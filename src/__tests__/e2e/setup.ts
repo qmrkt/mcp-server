@@ -298,6 +298,8 @@ export async function createE2EHarness(): Promise<E2EHarness> {
     usdcAsaId: deployment.usdcAsaId,
     agentMnemonic: "",
     faucetUrl: "http://localhost:9999/faucet", // no real faucet on localnet
+    pinataJwt: "",
+    pinataGateway: "",
   };
 
   const { server } = createQuestionMarketServer(config);

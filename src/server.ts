@@ -14,10 +14,11 @@ import {
   safe,
   getMnemonicAccount,
   generateWallet,
-  indexerGet as indexerGetHelper,
   compileCreateMarketBlueprint,
 } from "./helpers.js";
 import { MCP_SERVER_VERSION } from "./version.js";
+import { IndexerClient } from "@questionmarket/sdk/indexer";
+import { IpfsClient } from "@questionmarket/sdk/ipfs";
 
 import {
   AtomicCreateUnsupportedError,
@@ -69,6 +70,8 @@ export interface ServerConfig {
   usdcAsaId: number;
   agentMnemonic: string;
   faucetUrl: string;
+  pinataJwt: string;
+  pinataGateway: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -91,6 +94,8 @@ export function createQuestionMarketServer(config: ServerConfig) {
     usdcAsaId,
     agentMnemonic,
     faucetUrl,
+    pinataJwt,
+    pinataGateway,
   } = config;
 
   const algod = new algosdk.Algodv2(algodToken, algodServer, algodPort);
@@ -98,7 +103,12 @@ export function createQuestionMarketServer(config: ServerConfig) {
   const textEncoder = new TextEncoder();
   const hasTradingConfig = usdcAsaId > 0;
   const hasCreateMarketConfig = hasTradingConfig && factoryAppId > 0 && protocolConfigAppId > 0;
-  const hasImageUploadConfig = indexerWriteToken.length > 0;
+  const hasImageUploadConfig = pinataJwt.length > 0;
+
+  const indexer = new IndexerClient({ baseUrl: indexerUrl, auth: indexerAuth || undefined });
+  const ipfs = pinataJwt
+    ? new IpfsClient({ pinataJwt, pinataGateway: pinataGateway || undefined })
+    : null;
 
   // Session state (isolated per server instance)
   let sessionMnemonic: string | null = null;
@@ -248,10 +258,6 @@ export function createQuestionMarketServer(config: ServerConfig) {
 
   // ── Helpers ──
 
-  function indexerGet(urlPath: string): Promise<unknown> {
-    return indexerGetHelper(indexerUrl, urlPath, indexerAuth || undefined);
-  }
-
   type IndexerPosition = {
     appId: number;
     address: string;
@@ -335,7 +341,7 @@ export function createQuestionMarketServer(config: ServerConfig) {
   }
 
   async function getIndexedMarket(appId: number): Promise<NormalizedIndexerMarket> {
-    const raw = (await indexerGet(`/markets/${appId}`)) as any;
+    const raw = (await indexer.getMarket(appId)) as any;
     // Frontend proxy wraps in {market: ...}, raw indexer returns bare object
     return normalizeIndexerMarket(raw.market ?? raw);
   }
@@ -426,8 +432,8 @@ export function createQuestionMarketServer(config: ServerConfig) {
 
   async function getCurrentHoldings(address: string) {
     const [positionsRaw, lpRaw] = await Promise.all([
-      indexerGet(`/users/${address}/positions`) as Promise<IndexerPosition[]>,
-      indexerGet(`/users/${address}/lp`) as Promise<IndexerLpStake[]>,
+      indexer.getUserPositions(address) as Promise<IndexerPosition[]>,
+      indexer.getUserLp(address) as Promise<IndexerLpStake[]>,
     ]);
 
     const positions = (Array.isArray(positionsRaw) ? positionsRaw : []).filter(
@@ -459,7 +465,7 @@ export function createQuestionMarketServer(config: ServerConfig) {
 
     const marketResults = await Promise.allSettled(
       appIds.map(async (appId) => {
-        const raw = (await indexerGet(`/markets/${appId}`)) as IndexerMarket
+        const raw = (await indexer.getMarket(appId)) as IndexerMarket
         return [appId, normalizeIndexerMarket(raw)] as const
       })
     );
@@ -625,7 +631,7 @@ export function createQuestionMarketServer(config: ServerConfig) {
     ...(!hasImageUploadConfig
       ? [{
           tools: ["set_market_image"],
-          reason: "Set INDEXER_WRITE_TOKEN to enable authenticated market image uploads.",
+          reason: "Set PINATA_JWT to enable IPFS image uploads.",
         }]
       : []),
   ];
@@ -686,7 +692,7 @@ export function createQuestionMarketServer(config: ServerConfig) {
     { status: z.number().optional().describe("Filter by status code") },
     safe(
       async ({ status }) =>
-        text(filterSupportedMarketPayload(await indexerGet(status !== undefined ? `/markets?status=${status}` : "/markets"))),
+        text(filterSupportedMarketPayload(await indexer.listMarkets(status !== undefined ? { status } : undefined))),
       "list_markets"
     )
   );
@@ -719,7 +725,7 @@ export function createQuestionMarketServer(config: ServerConfig) {
       limit: z.number().int().min(1).max(500).optional().default(50),
     },
     safe(
-      async ({ app_id, limit }) => text(await indexerGet(`/markets/${app_id}/trades?limit=${limit}`)),
+      async ({ app_id, limit }) => text(await indexer.getMarketTrades(app_id, limit)),
       "get_market_trades"
     )
   );
@@ -732,7 +738,7 @@ export function createQuestionMarketServer(config: ServerConfig) {
       limit: z.number().int().min(1).max(500).optional().default(100),
     },
     safe(
-      async ({ app_id, limit }) => text(await indexerGet(`/markets/${app_id}/prices?limit=${limit}`)),
+      async ({ app_id, limit }) => text(await indexer.getPriceHistory(app_id, limit)),
       "get_price_history"
     )
   );
@@ -743,7 +749,7 @@ export function createQuestionMarketServer(config: ServerConfig) {
     { address: z.string().describe("Algorand address") },
     safe(async ({ address }) => {
       try {
-        return text(await indexerGet(`/users/${address}/positions`));
+        return text(await indexer.getUserPositions(address));
       } catch {
         return text([]);
       }
@@ -767,14 +773,14 @@ export function createQuestionMarketServer(config: ServerConfig) {
     "get_market_positions",
     "Get all user positions in a specific market.",
     { app_id: z.number().int().positive().describe("Market application ID") },
-    safe(async ({ app_id }) => text(await indexerGet(`/markets/${app_id}/positions`)), "get_market_positions")
+    safe(async ({ app_id }) => text(await indexer.getMarketPositions(app_id)), "get_market_positions")
   );
 
   server.tool(
     "get_leaderboard",
     "Get the leaderboard: wallets ranked by trading PnL.",
     {},
-    safe(async () => text(await indexerGet("/leaderboard")), "get_leaderboard")
+    safe(async () => text(await indexer.getLeaderboard()), "get_leaderboard")
   );
 
   // ── Write tools ──
@@ -804,7 +810,24 @@ export function createQuestionMarketServer(config: ServerConfig) {
         const block = await algod.block(Number(status.lastRound)).do();
         const blockTs = Number(block.block.header.timestamp);
         const deadline = blockTs + Math.floor(deadline_hours * 3600);
-        const notePayload = JSON.stringify({ q: question, o: outcomes });
+        // Upload image to IPFS before creating market so CID can go in the note
+        let imageCid: string | null = null;
+        let imageStatus: "none" | "uploaded" | "failed" | "skipped_no_ipfs" = "none";
+        if (image_url && !ipfs) {
+          imageStatus = "skipped_no_ipfs";
+        } else if (image_url && ipfs) {
+          imageStatus = "failed";
+          try {
+            imageCid = await ipfs.uploadFromUrl(image_url);
+            imageStatus = "uploaded";
+          } catch {
+            // Non-fatal: market will be created without an image CID.
+          }
+        }
+
+        const noteObj: Record<string, unknown> = { q: question, o: outcomes };
+        if (imageCid) noteObj.img = imageCid;
+        const notePayload = JSON.stringify(noteObj);
         const sharedBlueprint = blueprint;
         const compiledMainBlueprint = compileCreateMarketBlueprint(
           question,
@@ -851,35 +874,6 @@ export function createQuestionMarketServer(config: ServerConfig) {
           throw error;
         }
 
-        let imageStatus: "none" | "uploaded" | "failed" | "skipped_missing_write_token" = "none";
-        if (image_url && !hasImageUploadConfig) {
-          imageStatus = "skipped_missing_write_token";
-        } else if (image_url && indexerWriteToken) {
-          imageStatus = "failed";
-          try {
-            const imgResp = await fetch(image_url);
-            if (imgResp.ok) {
-              const ct = imgResp.headers.get("content-type") || "";
-              if (["image/jpeg", "image/png", "image/webp"].some(t => ct.includes(t))) {
-                const imgBody = await imgResp.arrayBuffer();
-                if (imgBody.byteLength <= 2 * 1024 * 1024) {
-                  const putResp = await fetch(`${indexerUrl}/markets/${atomicResult.marketAppId}/image`, {
-                    method: "PUT",
-                    headers: {
-                      Authorization: `Bearer ${indexerWriteToken}`,
-                      "Content-Type": ct.includes("png") ? "image/png" : ct.includes("webp") ? "image/webp" : "image/jpeg",
-                    },
-                    body: imgBody,
-                  });
-                  imageStatus = putResp.ok ? "uploaded" : "failed";
-                }
-              }
-            }
-          } catch {
-            // Non-fatal: market was created, image upload is best-effort.
-          }
-        }
-
         return text({
           success: true,
           appId: atomicResult.marketAppId,
@@ -892,6 +886,7 @@ export function createQuestionMarketServer(config: ServerConfig) {
           lp_entry_max_price,
           deadline: new Date(deadline * 1000).toISOString(),
           image: imageStatus,
+          image_cid: imageCid,
         });
       }, "create_market")
     );
@@ -900,26 +895,15 @@ export function createQuestionMarketServer(config: ServerConfig) {
   if (hasImageUploadConfig) {
     server.tool(
       "set_market_image",
-      "Set or update the thumbnail image for an existing market by downloading from a URL.",
+      "Upload an image to IPFS for an existing market. Returns the CID that can be used to reference the image.",
       {
         app_id: z.number().int().positive().describe("Market application ID"),
-        image_url: z.string().url().describe("URL of the image to download and set (JPEG, PNG, or WebP, max 2MB)"),
+        image_url: z.string().url().describe("URL of the image to upload (JPEG, PNG, or WebP)"),
       },
       safe(async ({ app_id, image_url }) => {
-        const imgResp = await fetch(image_url);
-        if (!imgResp.ok) throw new Error(`Failed to download image: HTTP ${imgResp.status}`);
-        const ct = imgResp.headers.get("content-type") || "";
-        const mime = ct.includes("png") ? "image/png" : ct.includes("webp") ? "image/webp" : ct.includes("jpeg") || ct.includes("jpg") ? "image/jpeg" : "";
-        if (!mime) throw new Error(`Unsupported image type: ${ct}. Use JPEG, PNG, or WebP.`);
-        const imgBody = await imgResp.arrayBuffer();
-        if (imgBody.byteLength > 2 * 1024 * 1024) throw new Error(`Image too large: ${(imgBody.byteLength / 1024 / 1024).toFixed(1)} MB. Max 2 MB.`);
-        const putResp = await fetch(`${indexerUrl}/markets/${app_id}/image`, {
-          method: "PUT",
-          headers: { Authorization: `Bearer ${indexerWriteToken}`, "Content-Type": mime },
-          body: imgBody,
-        });
-        if (!putResp.ok) throw new Error(`Indexer rejected image: HTTP ${putResp.status}`);
-        return text({ success: true, app_id, image: "uploaded" });
+        if (!ipfs) throw new Error("IPFS client not configured. Set PINATA_JWT to enable image uploads.");
+        const cid = await ipfs.uploadFromUrl(image_url);
+        return text({ success: true, app_id, image: "uploaded", cid });
       }, "set_market_image")
     );
   }

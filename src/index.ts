@@ -69,6 +69,8 @@ export function createRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Serve
     usdcAsaId: Number(env.USDC_ASA_ID || dep.USDC_ASA_ID || "0"),
     agentMnemonic: env.AGENT_MNEMONIC || "",
     faucetUrl: env.FAUCET_URL || "https://question.market/api/faucet",
+    pinataJwt: env.PINATA_JWT || "",
+    pinataGateway: env.PINATA_GATEWAY || "",
   };
 }
 
@@ -87,9 +89,9 @@ function startupWarnings(config: ServerConfig): string[] {
     );
   }
 
-  if (!config.indexerWriteToken) {
+  if (!config.pinataJwt) {
     warnings.push(
-      "INDEXER_WRITE_TOKEN is not configured. set_market_image is disabled and create_market image uploads will be skipped."
+      "PINATA_JWT is not configured. set_market_image is disabled and create_market image uploads will be skipped."
     );
   }
 

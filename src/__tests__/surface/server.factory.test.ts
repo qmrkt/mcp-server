@@ -72,6 +72,7 @@ describe("server factory", () => {
       protocolConfigAppId: 0,
       usdcAsaId: 0,
       indexerWriteToken: "",
+      pinataJwt: "",
     });
 
     const result = await harness.client.listTools();

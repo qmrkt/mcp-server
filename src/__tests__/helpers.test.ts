@@ -6,7 +6,6 @@ import {
   safe,
   getMnemonicAccount,
   generateWallet,
-  indexerGet,
   buildDefaultHumanJudgeBlueprint,
   compileCreateMarketBlueprint,
 } from "../helpers.js";
@@ -298,49 +297,6 @@ describe("generateWallet", () => {
     const { address, mnemonic } = generateWallet();
     const { addr } = getMnemonicAccount(mnemonic);
     expect(addr).toBe(address);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// indexerGet()
-// ---------------------------------------------------------------------------
-
-describe("indexerGet", () => {
-  it("fetches and parses JSON on success", async () => {
-    const mockData = { markets: [{ appId: 123 }] };
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve(mockData),
-    }));
-
-    const result = await indexerGet("http://localhost:3001", "/markets");
-    expect(result).toEqual(mockData);
-    expect(fetch).toHaveBeenCalledWith("http://localhost:3001/markets", {
-      headers: {},
-    });
-
-    vi.unstubAllGlobals();
-  });
-
-  it("throws on non-ok response", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-      ok: false,
-      status: 404,
-    }));
-
-    await expect(indexerGet("http://localhost:3001", "/markets/999"))
-      .rejects.toThrow("Indexer /markets/999: 404");
-
-    vi.unstubAllGlobals();
-  });
-
-  it("throws on network failure", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("fetch failed")));
-
-    await expect(indexerGet("http://localhost:3001", "/markets"))
-      .rejects.toThrow("fetch failed");
-
-    vi.unstubAllGlobals();
   });
 });
 

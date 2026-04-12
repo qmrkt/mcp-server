@@ -136,20 +136,6 @@ export function generateWallet(): { address: string; mnemonic: string } {
 }
 
 // ---------------------------------------------------------------------------
-// Indexer helper
-// ---------------------------------------------------------------------------
-
-export async function indexerGet(baseUrl: string, urlPath: string, auth?: string): Promise<unknown> {
-  const headers: Record<string, string> = {};
-  if (auth) {
-    headers["Authorization"] = `Basic ${btoa(auth)}`;
-  }
-  const resp = await fetch(`${baseUrl}${urlPath}`, { headers });
-  if (!resp.ok) throw new Error(`Indexer ${urlPath}: ${resp.status}`);
-  return resp.json();
-}
-
-// ---------------------------------------------------------------------------
 // Blueprint builder
 // ---------------------------------------------------------------------------
 
