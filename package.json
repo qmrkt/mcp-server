@@ -11,7 +11,8 @@
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run --exclude 'src/__tests__/e2e/**'",
+    "test:e2e": "vitest run src/__tests__/e2e"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
