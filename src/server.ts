@@ -17,12 +17,13 @@ import {
   indexerGet as indexerGetHelper,
   compileCreateMarketBlueprint,
 } from "./helpers.js";
+import { MCP_SERVER_VERSION } from "./version.js";
 
 import {
   AtomicCreateUnsupportedError,
   MAX_ACTIVE_LP_OUTCOMES,
   createMarketAtomic,
-} from "@question/sdk/clients/market-factory";
+} from "@questionmarket/sdk/clients/market-factory";
 import {
   buy,
   claimLpFees,
@@ -33,12 +34,12 @@ import {
   enterActiveLpForDeposit,
   claim,
   refund,
-} from "@question/sdk/clients/question-market";
-import type { ClientConfig } from "@question/sdk/clients/base";
+} from "@questionmarket/sdk/clients/question-market";
+import type { ClientConfig } from "@questionmarket/sdk/clients/base";
 import {
   quoteBuyForBudgetFromState,
   quoteBuyForSharesFromState,
-} from "@question/sdk";
+} from "@questionmarket/sdk";
 import {
   CURRENT_MARKET_CONTRACT_VERSION,
   DEFAULT_LP_ENTRY_MAX_PRICE_FP,
@@ -47,7 +48,7 @@ import {
   marketStatusName,
   normalizeIndexerMarket,
   type NormalizedIndexerMarket,
-} from "@question/sdk/clients/market-schema";
+} from "@questionmarket/sdk/clients/market-schema";
 
 // ---------------------------------------------------------------------------
 // Config type
@@ -95,6 +96,9 @@ export function createQuestionMarketServer(config: ServerConfig) {
   const algod = new algosdk.Algodv2(algodToken, algodServer, algodPort);
   const kmd = new algosdk.Kmd(kmdToken, kmdServer, kmdPort);
   const textEncoder = new TextEncoder();
+  const hasTradingConfig = usdcAsaId > 0;
+  const hasCreateMarketConfig = hasTradingConfig && factoryAppId > 0 && protocolConfigAppId > 0;
+  const hasImageUploadConfig = indexerWriteToken.length > 0;
 
   // Session state (isolated per server instance)
   let sessionMnemonic: string | null = null;
@@ -577,7 +581,56 @@ export function createQuestionMarketServer(config: ServerConfig) {
 
   // ── Server ──
 
-  const server = new McpServer({ name: "question-market", version: "0.3.0" });
+  const onboardingToolNames = ["create_wallet", "set_wallet", "request_testnet_tokens", "get_balance"];
+  const readToolNames = [
+    "list_markets",
+    "get_market",
+    "get_market_trades",
+    "get_price_history",
+    "get_positions",
+    "get_current_holdings",
+    "get_market_positions",
+    "get_leaderboard",
+  ];
+  const tradingToolNames = [
+    "buy_shares",
+    "sell_shares",
+    "enter_lp_active",
+    "claim_lp_fees",
+    "withdraw_lp_fees",
+    "claim_lp_residual",
+    "claim_winnings",
+    "refund_shares",
+  ];
+  const availableWriteToolNames = [
+    ...(hasCreateMarketConfig ? ["create_market"] : []),
+    ...(hasImageUploadConfig ? ["set_market_image"] : []),
+    ...(hasTradingConfig ? tradingToolNames : []),
+  ];
+  const disabledWriteTools = [
+    ...(!hasCreateMarketConfig
+      ? [{
+          tools: ["create_market"],
+          reason: hasTradingConfig
+            ? "Set FACTORY_APP_ID and PROTOCOL_CONFIG_APP_ID to enable market creation outside the monorepo."
+            : "Set USDC_ASA_ID, FACTORY_APP_ID, and PROTOCOL_CONFIG_APP_ID to enable market creation outside the monorepo.",
+        }]
+      : []),
+    ...(!hasTradingConfig
+      ? [{
+          tools: tradingToolNames,
+          reason: "Set USDC_ASA_ID to enable trading, LP, claims, refunds, and USDC-aware balance reporting.",
+        }]
+      : []),
+    ...(!hasImageUploadConfig
+      ? [{
+          tools: ["set_market_image"],
+          reason: "Set INDEXER_WRITE_TOKEN to enable authenticated market image uploads.",
+        }]
+      : []),
+  ];
+
+  const server = new McpServer({ name: "question-market", version: MCP_SERVER_VERSION });
   const blueprintInputSchema = z
     .union([z.string(), z.object({}).passthrough()])
     .describe(
@@ -598,17 +651,25 @@ export function createQuestionMarketServer(config: ServerConfig) {
           "1. create_wallet() to generate an Algorand account",
           "2. set_wallet(mnemonic) to activate it for this MCP connection",
           "3. request_testnet_tokens(address) to get 10 ALGO + 100 tUSDC",
-          "4. Start trading with buy_shares, sell_shares, enter_lp_active, and claim_winnings.",
+          hasTradingConfig
+            ? "4. Start trading with buy_shares, sell_shares, enter_lp_active, and claim_winnings."
+            : "4. To enable trading and market creation outside the monorepo, set USDC_ASA_ID, FACTORY_APP_ID, and PROTOCOL_CONFIG_APP_ID before starting the server.",
         ],
         data_conventions: {
           amounts: "Input parameters use display units (5 = $5 USDC). Response amounts are micro-units (5000000 = $5 USDC). 1 USDC = 1,000,000 micro-USDC. 1 share = 1,000,000 micro-shares.",
           market_status: "0=CREATED, 1=ACTIVE (trading open), 2=RESOLUTION_PENDING, 3=RESOLUTION_PROPOSED, 4=CANCELLED (refund eligible), 5=RESOLVED (claim eligible), 6=DISPUTED",
           wallet: "Call set_wallet once per session. It persists until connection closes or set_wallet is called again. Overrides wallet_index on all write tools.",
         },
+        configuration: {
+          trading_enabled: hasTradingConfig,
+          create_market_enabled: hasCreateMarketConfig,
+          set_market_image_enabled: hasImageUploadConfig,
+          disabled_write_tools: disabledWriteTools,
+        },
         tools: {
-          onboarding: ["create_wallet", "set_wallet", "request_testnet_tokens", "get_balance"],
-          read: ["list_markets", "get_market", "get_market_trades", "get_price_history", "get_positions", "get_current_holdings", "get_market_positions", "get_leaderboard"],
-          write: ["create_market", "set_market_image", "buy_shares", "sell_shares", "enter_lp_active", "claim_lp_fees", "withdraw_lp_fees", "claim_lp_residual", "claim_winnings", "refund_shares"],
+          onboarding: onboardingToolNames,
+          read: readToolNames,
+          write: availableWriteToolNames,
         },
         resources: ["market://{appId}"],
         docs: "https://question.market/docs/mcp",
@@ -718,436 +779,442 @@ export function createQuestionMarketServer(config: ServerConfig) {
 
   // ── Write tools ──
 
-  server.tool(
-    "create_market",
-    `Create a new prediction market atomically. Supports 2-${MAX_ACTIVE_LP_OUTCOMES} outcomes. Provide blueprint to use the same logic for both main and dispute paths, or main_blueprint and dispute_blueprint to author them separately. All custom blueprint JSON is validated and compiled with the same rules as the frontend editor.`,
-    {
-      question: z.string().max(1000).describe("The question for the market (max 1000 chars)"),
-      outcomes: z.array(z.string().max(200)).min(2).max(MAX_ACTIVE_LP_OUTCOMES).describe(`Outcome labels (2-${MAX_ACTIVE_LP_OUTCOMES}, created atomically in one on-chain group)`),
-      liquidity_usdc: z.number().positive().default(50).describe("Initial liquidity in USDC (default 50)"),
-      deadline_hours: z.number().positive().max(8760).default(24).describe("Hours until market deadline (default 24, max 8760 = 1 year)"),
-      lp_entry_max_price: z.number().gt(0).lte(1).default(DEFAULT_LP_ENTRY_MAX_PRICE_FP / 1_000_000).describe("Immutable LP skew cap as a probability from 0 to 1 (default 0.8)"),
-      blueprint: blueprintInputSchema.optional().describe("Shared blueprint for both main and dispute paths."),
-      main_blueprint: blueprintInputSchema.optional().describe("Optional main-path blueprint JSON. Overrides blueprint for the main path."),
-      dispute_blueprint: blueprintInputSchema.optional().describe("Optional dispute-path blueprint JSON. Overrides blueprint for the dispute path."),
-      image_url: z.string().url().optional().describe("URL of an image to use as market thumbnail (JPEG, PNG, or WebP, max 2MB). Downloaded and stored by the indexer."),
-    },
-    safe(async ({ question, outcomes, liquidity_usdc, deadline_hours, lp_entry_max_price, blueprint, main_blueprint, dispute_blueprint, image_url }) => {
-      const account = await getAccount(0);
-      const liquidityMicro = BigInt(liquidity_usdc * 1_000_000);
-      const lpEntryMaxPriceFp = BigInt(Math.round(lp_entry_max_price * 1_000_000));
-      await ensureFunded(account, liquidityMicro);
+  if (hasCreateMarketConfig) {
+    server.tool(
+      "create_market",
+      `Create a new prediction market atomically. Supports 2-${MAX_ACTIVE_LP_OUTCOMES} outcomes. Provide blueprint to use the same logic for both main and dispute paths, or main_blueprint and dispute_blueprint to author them separately. All custom blueprint JSON is validated and compiled with the same rules as the frontend editor.`,
+      {
+        question: z.string().max(1000).describe("The question for the market (max 1000 chars)"),
+        outcomes: z.array(z.string().max(200)).min(2).max(MAX_ACTIVE_LP_OUTCOMES).describe(`Outcome labels (2-${MAX_ACTIVE_LP_OUTCOMES}, created atomically in one on-chain group)`),
+        liquidity_usdc: z.number().positive().default(50).describe("Initial liquidity in USDC (default 50)"),
+        deadline_hours: z.number().positive().max(8760).default(24).describe("Hours until market deadline (default 24, max 8760 = 1 year)"),
+        lp_entry_max_price: z.number().gt(0).lte(1).default(DEFAULT_LP_ENTRY_MAX_PRICE_FP / 1_000_000).describe("Immutable LP skew cap as a probability from 0 to 1 (default 0.8)"),
+        blueprint: blueprintInputSchema.optional().describe("Shared blueprint for both main and dispute paths."),
+        main_blueprint: blueprintInputSchema.optional().describe("Optional main-path blueprint JSON. Overrides blueprint for the main path."),
+        dispute_blueprint: blueprintInputSchema.optional().describe("Optional dispute-path blueprint JSON. Overrides blueprint for the dispute path."),
+        image_url: z.string().url().optional().describe("URL of an image to use as market thumbnail (JPEG, PNG, or WebP, max 2MB). Downloaded and stored by the indexer."),
+      },
+      safe(async ({ question, outcomes, liquidity_usdc, deadline_hours, lp_entry_max_price, blueprint, main_blueprint, dispute_blueprint, image_url }) => {
+        const account = await getAccount(0);
+        const liquidityMicro = BigInt(liquidity_usdc * 1_000_000);
+        const lpEntryMaxPriceFp = BigInt(Math.round(lp_entry_max_price * 1_000_000));
+        await ensureFunded(account, liquidityMicro);
 
-      const status = await algod.status().do();
-      const block = await algod.block(Number(status.lastRound)).do();
-      const blockTs = Number(block.block.header.timestamp);
-      const deadline = blockTs + Math.floor(deadline_hours * 3600);
-      const notePayload = JSON.stringify({ q: question, o: outcomes });
-      const sharedBlueprint = blueprint;
-      const compiledMainBlueprint = compileCreateMarketBlueprint(
-        question,
-        outcomes,
-        deadline,
-        main_blueprint ?? sharedBlueprint,
-      );
-      const compiledDisputeBlueprint = compileCreateMarketBlueprint(
-        question,
-        outcomes,
-        deadline,
-        dispute_blueprint ?? sharedBlueprint,
-      );
-      const blueprintSource =
-        compiledMainBlueprint.source === compiledDisputeBlueprint.source
-          ? compiledMainBlueprint.source
-          : "mixed";
-
-      let atomicResult: Awaited<ReturnType<typeof createMarketAtomic>>;
-      try {
-        atomicResult = await createMarketAtomicWithRetry(
-          clientConfig(account.addr, account.signer, factoryAppId),
-          {
-            currencyAsa: usdcAsaId,
-            questionHash: textEncoder.encode(question),
-            numOutcomes: outcomes.length,
-            initialB: 0n,
-            lpFeeBps: 200,
-            mainBlueprint: compiledMainBlueprint.bytes,
-            disputeBlueprint: compiledDisputeBlueprint.bytes,
-            deadline,
-            challengeWindowSecs: 3600,
-            cancellable: true,
-            bootstrapDeposit: liquidityMicro,
-            lpEntryMaxPriceFp,
-            protocolConfigAppId: protocolConfigAppId,
-            note: textEncoder.encode(`question.market:j${notePayload}`),
-          }
+        const status = await algod.status().do();
+        const block = await algod.block(Number(status.lastRound)).do();
+        const blockTs = Number(block.block.header.timestamp);
+        const deadline = blockTs + Math.floor(deadline_hours * 3600);
+        const notePayload = JSON.stringify({ q: question, o: outcomes });
+        const sharedBlueprint = blueprint;
+        const compiledMainBlueprint = compileCreateMarketBlueprint(
+          question,
+          outcomes,
+          deadline,
+          main_blueprint ?? sharedBlueprint,
         );
-      } catch (error) {
-        if (error instanceof AtomicCreateUnsupportedError) {
-          throw new Error(error.message);
-        }
-        throw error;
-      }
+        const compiledDisputeBlueprint = compileCreateMarketBlueprint(
+          question,
+          outcomes,
+          deadline,
+          dispute_blueprint ?? sharedBlueprint,
+        );
+        const blueprintSource =
+          compiledMainBlueprint.source === compiledDisputeBlueprint.source
+            ? compiledMainBlueprint.source
+            : "mixed";
 
-      let imageUploaded = false;
-      if (image_url && indexerWriteToken) {
+        let atomicResult: Awaited<ReturnType<typeof createMarketAtomic>>;
         try {
-          const imgResp = await fetch(image_url);
-          if (imgResp.ok) {
-            const ct = imgResp.headers.get("content-type") || "";
-            if (["image/jpeg", "image/png", "image/webp"].some(t => ct.includes(t))) {
-              const imgBody = await imgResp.arrayBuffer();
-              if (imgBody.byteLength <= 2 * 1024 * 1024) {
-                const putResp = await fetch(`${indexerUrl}/markets/${atomicResult.marketAppId}/image`, {
-                  method: "PUT",
-                  headers: {
-                    Authorization: `Bearer ${indexerWriteToken}`,
-                    "Content-Type": ct.includes("png") ? "image/png" : ct.includes("webp") ? "image/webp" : "image/jpeg",
-                  },
-                  body: imgBody,
-                });
-                imageUploaded = putResp.ok;
+          atomicResult = await createMarketAtomicWithRetry(
+            clientConfig(account.addr, account.signer, factoryAppId),
+            {
+              currencyAsa: usdcAsaId,
+              questionHash: textEncoder.encode(question),
+              numOutcomes: outcomes.length,
+              initialB: 0n,
+              lpFeeBps: 200,
+              mainBlueprint: compiledMainBlueprint.bytes,
+              disputeBlueprint: compiledDisputeBlueprint.bytes,
+              deadline,
+              challengeWindowSecs: 3600,
+              cancellable: true,
+              bootstrapDeposit: liquidityMicro,
+              lpEntryMaxPriceFp,
+              protocolConfigAppId: protocolConfigAppId,
+              note: textEncoder.encode(`question.market:j${notePayload}`),
+            }
+          );
+        } catch (error) {
+          if (error instanceof AtomicCreateUnsupportedError) {
+            throw new Error(error.message);
+          }
+          throw error;
+        }
+
+        let imageStatus: "none" | "uploaded" | "failed" | "skipped_missing_write_token" = "none";
+        if (image_url && !hasImageUploadConfig) {
+          imageStatus = "skipped_missing_write_token";
+        } else if (image_url && indexerWriteToken) {
+          imageStatus = "failed";
+          try {
+            const imgResp = await fetch(image_url);
+            if (imgResp.ok) {
+              const ct = imgResp.headers.get("content-type") || "";
+              if (["image/jpeg", "image/png", "image/webp"].some(t => ct.includes(t))) {
+                const imgBody = await imgResp.arrayBuffer();
+                if (imgBody.byteLength <= 2 * 1024 * 1024) {
+                  const putResp = await fetch(`${indexerUrl}/markets/${atomicResult.marketAppId}/image`, {
+                    method: "PUT",
+                    headers: {
+                      Authorization: `Bearer ${indexerWriteToken}`,
+                      "Content-Type": ct.includes("png") ? "image/png" : ct.includes("webp") ? "image/webp" : "image/jpeg",
+                    },
+                    body: imgBody,
+                  });
+                  imageStatus = putResp.ok ? "uploaded" : "failed";
+                }
               }
             }
+          } catch {
+            // Non-fatal: market was created, image upload is best-effort.
           }
-        } catch {
-          // Non-fatal: market was created, image upload is best-effort.
         }
-      }
 
-      return text({
-        success: true,
-        appId: atomicResult.marketAppId,
-        question,
-        outcomes,
-        blueprint_source: blueprintSource,
-        main_blueprint_source: compiledMainBlueprint.source,
-        dispute_blueprint_source: compiledDisputeBlueprint.source,
-        liquidity: `${liquidity_usdc} USDC`,
-        lp_entry_max_price,
-        deadline: new Date(deadline * 1000).toISOString(),
-        image: imageUploaded ? "uploaded" : image_url ? "failed" : "none",
-      });
-    }, "create_market")
-  );
+        return text({
+          success: true,
+          appId: atomicResult.marketAppId,
+          question,
+          outcomes,
+          blueprint_source: blueprintSource,
+          main_blueprint_source: compiledMainBlueprint.source,
+          dispute_blueprint_source: compiledDisputeBlueprint.source,
+          liquidity: `${liquidity_usdc} USDC`,
+          lp_entry_max_price,
+          deadline: new Date(deadline * 1000).toISOString(),
+          image: imageStatus,
+        });
+      }, "create_market")
+    );
+  }
 
-  server.tool(
-    "set_market_image",
-    "Set or update the thumbnail image for an existing market by downloading from a URL.",
-    {
-      app_id: z.number().int().positive().describe("Market application ID"),
-      image_url: z.string().url().describe("URL of the image to download and set (JPEG, PNG, or WebP, max 2MB)"),
-    },
-    safe(async ({ app_id, image_url }) => {
-      if (!indexerWriteToken) {
-        throw new Error("Indexer write token not configured. Set INDEXER_WRITE_TOKEN env var.");
-      }
-      const imgResp = await fetch(image_url);
-      if (!imgResp.ok) throw new Error(`Failed to download image: HTTP ${imgResp.status}`);
-      const ct = imgResp.headers.get("content-type") || "";
-      const mime = ct.includes("png") ? "image/png" : ct.includes("webp") ? "image/webp" : ct.includes("jpeg") || ct.includes("jpg") ? "image/jpeg" : "";
-      if (!mime) throw new Error(`Unsupported image type: ${ct}. Use JPEG, PNG, or WebP.`);
-      const imgBody = await imgResp.arrayBuffer();
-      if (imgBody.byteLength > 2 * 1024 * 1024) throw new Error(`Image too large: ${(imgBody.byteLength / 1024 / 1024).toFixed(1)} MB. Max 2 MB.`);
-      const putResp = await fetch(`${indexerUrl}/markets/${app_id}/image`, {
-        method: "PUT",
-        headers: { Authorization: `Bearer ${indexerWriteToken}`, "Content-Type": mime },
-        body: imgBody,
-      });
-      if (!putResp.ok) throw new Error(`Indexer rejected image: HTTP ${putResp.status}`);
-      return text({ success: true, app_id, image: "uploaded" });
-    }, "set_market_image")
-  );
+  if (hasImageUploadConfig) {
+    server.tool(
+      "set_market_image",
+      "Set or update the thumbnail image for an existing market by downloading from a URL.",
+      {
+        app_id: z.number().int().positive().describe("Market application ID"),
+        image_url: z.string().url().describe("URL of the image to download and set (JPEG, PNG, or WebP, max 2MB)"),
+      },
+      safe(async ({ app_id, image_url }) => {
+        const imgResp = await fetch(image_url);
+        if (!imgResp.ok) throw new Error(`Failed to download image: HTTP ${imgResp.status}`);
+        const ct = imgResp.headers.get("content-type") || "";
+        const mime = ct.includes("png") ? "image/png" : ct.includes("webp") ? "image/webp" : ct.includes("jpeg") || ct.includes("jpg") ? "image/jpeg" : "";
+        if (!mime) throw new Error(`Unsupported image type: ${ct}. Use JPEG, PNG, or WebP.`);
+        const imgBody = await imgResp.arrayBuffer();
+        if (imgBody.byteLength > 2 * 1024 * 1024) throw new Error(`Image too large: ${(imgBody.byteLength / 1024 / 1024).toFixed(1)} MB. Max 2 MB.`);
+        const putResp = await fetch(`${indexerUrl}/markets/${app_id}/image`, {
+          method: "PUT",
+          headers: { Authorization: `Bearer ${indexerWriteToken}`, "Content-Type": mime },
+          body: imgBody,
+        });
+        if (!putResp.ok) throw new Error(`Indexer rejected image: HTTP ${putResp.status}`);
+        return text({ success: true, app_id, image: "uploaded" });
+      }, "set_market_image")
+    );
+  }
 
-  server.tool(
-    "buy_shares",
-    "Buy outcome shares in an ACTIVE market. Provide either a target share count or a max USDC budget; if share count is omitted, the tool computes the largest purchasable position within the budget. Requires an active wallet (call set_wallet first). Amounts in responses are micro-USDC (1 USDC = 1,000,000).",
-    {
-      app_id: z.number().int().positive().describe("Market application ID"),
-      outcome_index: z.number().int().min(0).max(15).describe("Outcome to buy (0-indexed)"),
-      max_cost_usdc: z.number().positive().describe("Maximum cost in USDC (e.g. 5 for $5)"),
-      num_shares: z.number().positive().optional().describe("Optional whole-share count in display units (e.g. 1 share). If omitted, the tool computes the largest whole-share position within max_cost_usdc."),
-      wallet_index: z.number().int().min(0).optional().default(0).describe("KMD wallet index (default 0 = deployer)"),
-    },
-    safe(async ({ app_id, outcome_index, max_cost_usdc, num_shares, wallet_index }) => {
-      await assertSupportedMarket(app_id, "buy_shares");
-      const account = await getAccount(wallet_index);
-      const state = await getMarketState(algod, app_id);
-      assertMarketStatus(app_id, Number(state.status), [1], "buy shares");
-      const maxCost = toMicroUnits(max_cost_usdc);
-      const quote = quoteBuyForState(
-        state,
-        outcome_index,
-        maxCost,
-        num_shares !== undefined ? sharesFromCount(num_shares) : undefined,
-      );
-
-      if (quote.error) {
-        throw new Error(quote.error);
-      }
-
-      if (num_shares !== undefined && quote.totalCost > maxCost) {
-        throw new Error("Trade cost exceeds your maximum.");
-      }
-
-      await ensureFunded(account, maxCost);
-
-      // SDK buy() handles app opt-in and ASA opt-ins internally via prepend txns.
-      const result = await buy(
-        clientConfig(account.addr, account.signer, app_id),
-        outcome_index, maxCost, Number(state.numOutcomes), usdcAsaId, quote.shares
-      );
-
-      const newState = await getMarketState(algod, app_id);
-      return text({
-        success: true,
-        action: "buy",
-        wallet: account.addr.slice(0, 8) + "...",
-        outcome_index,
-        requested_shares: result.shares.toString(),
-        total_cost: result.totalCost.toString(),
-        refund_amount: result.refundAmount.toString(),
-        max_cost: maxCost.toString(),
-        max_cost_usdc,
-        prices_after: newState.prices.map((p) => (Number(p) / 10000).toFixed(1) + "%"),
-        pool_usdc: (Number(newState.poolBalance) / 1_000_000).toFixed(2),
-        tx_id: result.txId,
-      });
-    }, "buy_shares")
-  );
-
-  server.tool(
-    "sell_shares",
-    "Sell outcome shares back to an ACTIVE market. If num_shares is omitted, the tool reads the on-chain position and sells everything for that outcome. Requires an active wallet (call set_wallet first). Amounts in responses are micro-USDC (1 USDC = 1,000,000).",
-    {
-      app_id: z.number().int().positive().describe("Market application ID"),
-      outcome_index: z.number().int().min(0).max(15).describe("Outcome to sell (0-indexed)"),
-      num_shares: z.number().positive().optional().describe("Optional whole-share count in display units. If omitted, the tool sells the full indexed position."),
-      wallet_index: z.number().int().min(0).optional().default(0).describe("KMD wallet index"),
-    },
-    safe(async ({ app_id, outcome_index, num_shares, wallet_index }) => {
-      await assertSupportedMarket(app_id, "sell_shares");
-      const account = await getAccount(wallet_index);
-      const state = await getMarketState(algod, app_id);
-      assertMarketStatus(app_id, Number(state.status), [1], "sell shares");
-      const shares = num_shares !== undefined
-        ? sharesFromCount(num_shares)
-        : await getOnChainOutcomeShares(account.addr, app_id, outcome_index);
-      if (shares <= 0n) {
-        throw new Error("No shares available to sell for this outcome.");
-      }
-
-      const result = await sell(
-        clientConfig(account.addr, account.signer, app_id),
-        outcome_index, 0n, Number(state.numOutcomes), null, usdcAsaId, shares
-      );
-
-      const newState = await getMarketState(algod, app_id);
-      return text({
-        success: true,
-        action: "sell",
-        wallet: account.addr.slice(0, 8) + "...",
-        outcome_index,
-        sold_shares: result.shares.toString(),
-        net_return: result.netReturn.toString(),
-        prices_after: newState.prices.map((p) => (Number(p) / 10000).toFixed(1) + "%"),
-        tx_id: result.txId,
-      });
-    }, "sell_shares")
-  );
-
-  server.tool(
-    "enter_lp_active",
-    "Deposit USDC as a liquidity provider in an ACTIVE market. You earn a share of trading fees (2% of each trade) proportional to your LP stake. Entry is blocked if any outcome price exceeds the market's LP skew cap (default 80%). Requires an active wallet (call set_wallet first).",
-    {
-      app_id: z.number().int().positive().describe("Market application ID"),
-      amount_usdc: z.number().positive().describe("USDC amount (e.g. 10 for $10)"),
-      wallet_index: z.number().int().min(0).optional().default(0).describe("KMD wallet index"),
-    },
-    safe(async ({ app_id, amount_usdc, wallet_index }) => {
-      await assertSupportedMarket(app_id, "enter_lp_active");
-      const account = await getAccount(wallet_index);
-      const amount = BigInt(Math.floor(amount_usdc * 1_000_000));
-      const state = await getMarketState(algod, app_id);
-      assertMarketStatus(app_id, Number(state.status), [1], "enter as LP");
-      const maxPrice = state.prices.reduce((currentMax, price) => (price > currentMax ? price : currentMax), 0n);
-      if (maxPrice > state.lpEntryMaxPriceFp) {
-        throw new Error(
-          `Active LP entry is disabled once any outcome exceeds ${formatPricePct(state.lpEntryMaxPriceFp)}. ` +
-          `The current max outcome price is ${formatPricePct(maxPrice)}.`,
+  if (hasTradingConfig) {
+    server.tool(
+      "buy_shares",
+      "Buy outcome shares in an ACTIVE market. Provide either a target share count or a max USDC budget; if share count is omitted, the tool computes the largest purchasable position within the budget. Requires an active wallet (call set_wallet first). Amounts in responses are micro-USDC (1 USDC = 1,000,000).",
+      {
+        app_id: z.number().int().positive().describe("Market application ID"),
+        outcome_index: z.number().int().min(0).max(15).describe("Outcome to buy (0-indexed)"),
+        max_cost_usdc: z.number().positive().describe("Maximum cost in USDC (e.g. 5 for $5)"),
+        num_shares: z.number().positive().optional().describe("Optional whole-share count in display units (e.g. 1 share). If omitted, the tool computes the largest whole-share position within max_cost_usdc."),
+        wallet_index: z.number().int().min(0).optional().default(0).describe("KMD wallet index (default 0 = deployer)"),
+      },
+      safe(async ({ app_id, outcome_index, max_cost_usdc, num_shares, wallet_index }) => {
+        await assertSupportedMarket(app_id, "buy_shares");
+        const account = await getAccount(wallet_index);
+        const state = await getMarketState(algod, app_id);
+        assertMarketStatus(app_id, Number(state.status), [1], "buy shares");
+        const maxCost = toMicroUnits(max_cost_usdc);
+        const quote = quoteBuyForState(
+          state,
+          outcome_index,
+          maxCost,
+          num_shares !== undefined ? sharesFromCount(num_shares) : undefined,
         );
-      }
 
-      await ensureFunded(account, amount);
+        if (quote.error) {
+          throw new Error(quote.error);
+        }
 
-      const result = await enterActiveLpForDeposit(
-        clientConfig(account.addr, account.signer, app_id),
-        amount, Number(state.numOutcomes), usdcAsaId
-      );
-      const newState = await getMarketState(algod, app_id);
-      return text({
-        success: true,
-        action: "enter_lp_active",
-        amount_usdc,
-        target_delta_b: result.targetDeltaB.toString(),
-        pool_usdc: (Number(newState.poolBalance) / 1_000_000).toFixed(2),
-        tx_id: result.txId,
-      });
-    }, "enter_lp_active")
-  );
+        if (num_shares !== undefined && quote.totalCost > maxCost) {
+          throw new Error("Trade cost exceeds your maximum.");
+        }
 
-  server.tool(
-    "claim_lp_fees",
-    "Move earned LP trading fees from the pool's internal accounting into your withdrawable balance. Does not transfer USDC to your wallet; call withdraw_lp_fees to actually receive the funds. Works on ACTIVE, RESOLVED, or CANCELLED markets.",
-    {
-      app_id: z.number().int().positive().describe("Market application ID"),
-      wallet_index: z.number().int().min(0).optional().default(0).describe("KMD wallet index"),
-    },
-    safe(async ({ app_id, wallet_index }) => {
-      await assertSupportedMarket(app_id, "claim_lp_fees");
-      const account = await getAccount(wallet_index);
-      const state = await getMarketState(algod, app_id);
-      assertMarketStatus(app_id, Number(state.status), [1, 5, 4], "claim LP fees");
+        await ensureFunded(account, maxCost);
 
-      const result = await claimLpFees(
-        clientConfig(account.addr, account.signer, app_id),
-      );
-      return text({
-        success: true,
-        action: "claim_lp_fees",
-        tx_id: result.txId,
-      });
-    }, "claim_lp_fees")
-  );
+        // SDK buy() handles app opt-in and ASA opt-ins internally via prepend txns.
+        const result = await buy(
+          clientConfig(account.addr, account.signer, app_id),
+          outcome_index, maxCost, Number(state.numOutcomes), usdcAsaId, quote.shares
+        );
 
-  server.tool(
-    "withdraw_lp_fees",
-    "Claim and withdraw all available LP trading fees to your wallet in one call. Combines claim_lp_fees + withdrawal into a single operation. Works on ACTIVE, RESOLVED, or CANCELLED markets. Returns the withdrawn USDC amount.",
-    {
-      app_id: z.number().int().positive().describe("Market application ID"),
-      wallet_index: z.number().int().min(0).optional().default(0).describe("KMD wallet index"),
-    },
-    safe(async ({ app_id, wallet_index }) => {
-      await assertSupportedMarket(app_id, "withdraw_lp_fees");
-      const account = await getAccount(wallet_index);
-      const state = await getMarketState(algod, app_id);
-      assertMarketStatus(app_id, Number(state.status), [1, 5, 4], "withdraw LP fees");
+        const newState = await getMarketState(algod, app_id);
+        return text({
+          success: true,
+          action: "buy",
+          wallet: account.addr.slice(0, 8) + "...",
+          outcome_index,
+          requested_shares: result.shares.toString(),
+          total_cost: result.totalCost.toString(),
+          refund_amount: result.refundAmount.toString(),
+          max_cost: maxCost.toString(),
+          max_cost_usdc,
+          prices_after: newState.prices.map((p) => (Number(p) / 10000).toFixed(1) + "%"),
+          pool_usdc: (Number(newState.poolBalance) / 1_000_000).toFixed(2),
+          tx_id: result.txId,
+        });
+      }, "buy_shares")
+    );
 
-      const result = await collectLpFees(
-        clientConfig(account.addr, account.signer, app_id),
-        usdcAsaId,
-      );
-      return text({
-        success: true,
-        action: "withdraw_lp_fees",
-        claim_tx_id: result.claimTxId ?? null,
-        withdraw_tx_id: result.withdrawTxId ?? null,
-        withdrawn_amount: result.withdrawnAmount.toString(),
-      });
-    }, "withdraw_lp_fees")
-  );
+    server.tool(
+      "sell_shares",
+      "Sell outcome shares back to an ACTIVE market. If num_shares is omitted, the tool reads the on-chain position and sells everything for that outcome. Requires an active wallet (call set_wallet first). Amounts in responses are micro-USDC (1 USDC = 1,000,000).",
+      {
+        app_id: z.number().int().positive().describe("Market application ID"),
+        outcome_index: z.number().int().min(0).max(15).describe("Outcome to sell (0-indexed)"),
+        num_shares: z.number().positive().optional().describe("Optional whole-share count in display units. If omitted, the tool sells the full indexed position."),
+        wallet_index: z.number().int().min(0).optional().default(0).describe("KMD wallet index"),
+      },
+      safe(async ({ app_id, outcome_index, num_shares, wallet_index }) => {
+        await assertSupportedMarket(app_id, "sell_shares");
+        const account = await getAccount(wallet_index);
+        const state = await getMarketState(algod, app_id);
+        assertMarketStatus(app_id, Number(state.status), [1], "sell shares");
+        const shares = num_shares !== undefined
+          ? sharesFromCount(num_shares)
+          : await getOnChainOutcomeShares(account.addr, app_id, outcome_index);
+        if (shares <= 0n) {
+          throw new Error("No shares available to sell for this outcome.");
+        }
 
-  server.tool(
-    "claim_lp_residual",
-    "After a market resolves or is cancelled, withdraw your share of the remaining pool liquidity as an LP. Only callable on RESOLVED or CANCELLED markets. This is separate from LP fees; it returns your principal plus any pool surplus.",
-    {
-      app_id: z.number().int().positive().describe("Market application ID"),
-      wallet_index: z.number().int().min(0).optional().default(0).describe("KMD wallet index"),
-    },
-    safe(async ({ app_id, wallet_index }) => {
-      await assertSupportedMarket(app_id, "claim_lp_residual");
-      const account = await getAccount(wallet_index);
-      const state = await getMarketState(algod, app_id);
-      assertMarketStatus(app_id, Number(state.status), [4, 5], "claim LP residual");
+        const result = await sell(
+          clientConfig(account.addr, account.signer, app_id),
+          outcome_index, 0n, Number(state.numOutcomes), null, usdcAsaId, shares
+        );
 
-      const result = await claimLpResidual(
-        clientConfig(account.addr, account.signer, app_id),
-        usdcAsaId,
-      );
-      return text({
-        success: true,
-        action: "claim_lp_residual",
-        tx_id: result.txId,
-      });
-    }, "claim_lp_residual")
-  );
+        const newState = await getMarketState(algod, app_id);
+        return text({
+          success: true,
+          action: "sell",
+          wallet: account.addr.slice(0, 8) + "...",
+          outcome_index,
+          sold_shares: result.shares.toString(),
+          net_return: result.netReturn.toString(),
+          prices_after: newState.prices.map((p) => (Number(p) / 10000).toFixed(1) + "%"),
+          tx_id: result.txId,
+        });
+      }, "sell_shares")
+    );
 
-  server.tool(
-    "claim_winnings",
-    "Claim winning shares from a RESOLVED market. Auto-detects the winning outcome and your full position if parameters are omitted. Payout is 1 USDC per winning share. Amounts in responses are micro-USDC (1 USDC = 1,000,000).",
-    {
-      app_id: z.number().int().positive().describe("Market application ID"),
-      outcome_index: z.number().int().min(0).max(15).optional().describe("Winning outcome index. If omitted, the tool reads the resolved winning outcome from chain state."),
-      num_shares: z.number().positive().optional().describe("Optional whole-share count in display units. If omitted, the tool claims the full indexed winning position."),
-      wallet_index: z.number().int().min(0).optional().default(0).describe("KMD wallet index"),
-    },
-    safe(async ({ app_id, outcome_index, num_shares, wallet_index }) => {
-      await assertSupportedMarket(app_id, "claim_winnings");
-      const account = await getAccount(wallet_index);
-      const state = await getMarketState(algod, app_id);
-      assertMarketStatus(app_id, Number(state.status), [5], "claim winnings");
-      const resolvedOutcome = outcome_index ?? Number(state.winningOutcome);
-      const shares = num_shares !== undefined
-        ? sharesFromCount(num_shares)
-        : await getOnChainOutcomeShares(account.addr, app_id, resolvedOutcome);
-      if (shares <= 0n) {
-        throw new Error("No indexed winning shares available to claim.");
-      }
+    server.tool(
+      "enter_lp_active",
+      "Deposit USDC as a liquidity provider in an ACTIVE market. You earn a share of trading fees (2% of each trade) proportional to your LP stake. Entry is blocked if any outcome price exceeds the market's LP skew cap (default 80%). Requires an active wallet (call set_wallet first).",
+      {
+        app_id: z.number().int().positive().describe("Market application ID"),
+        amount_usdc: z.number().positive().describe("USDC amount (e.g. 10 for $10)"),
+        wallet_index: z.number().int().min(0).optional().default(0).describe("KMD wallet index"),
+      },
+      safe(async ({ app_id, amount_usdc, wallet_index }) => {
+        await assertSupportedMarket(app_id, "enter_lp_active");
+        const account = await getAccount(wallet_index);
+        const amount = BigInt(Math.floor(amount_usdc * 1_000_000));
+        const state = await getMarketState(algod, app_id);
+        assertMarketStatus(app_id, Number(state.status), [1], "enter as LP");
+        const maxPrice = state.prices.reduce((currentMax, price) => (price > currentMax ? price : currentMax), 0n);
+        if (maxPrice > state.lpEntryMaxPriceFp) {
+          throw new Error(
+            `Active LP entry is disabled once any outcome exceeds ${formatPricePct(state.lpEntryMaxPriceFp)}. ` +
+            `The current max outcome price is ${formatPricePct(maxPrice)}.`,
+          );
+        }
 
-      const result = await claim(
-        clientConfig(account.addr, account.signer, app_id),
-        resolvedOutcome, Number(state.numOutcomes), usdcAsaId, shares
-      );
+        await ensureFunded(account, amount);
 
-      return text({
-        success: true,
-        action: "claim",
-        wallet: account.addr.slice(0, 8) + "...",
-        outcome_index: resolvedOutcome,
-        claimed_shares: result.shares.toString(),
-        payout: result.payout.toString(),
-        tx_id: result.txId,
-      });
-    }, "claim_winnings")
-  );
+        const result = await enterActiveLpForDeposit(
+          clientConfig(account.addr, account.signer, app_id),
+          amount, Number(state.numOutcomes), usdcAsaId
+        );
+        const newState = await getMarketState(algod, app_id);
+        return text({
+          success: true,
+          action: "enter_lp_active",
+          amount_usdc,
+          target_delta_b: result.targetDeltaB.toString(),
+          pool_usdc: (Number(newState.poolBalance) / 1_000_000).toFixed(2),
+          tx_id: result.txId,
+        });
+      }, "enter_lp_active")
+    );
 
-  server.tool(
-    "refund_shares",
-    "Refund shares from a CANCELLED market at cost basis. If num_shares is omitted, the tool refunds your full position for the selected outcome. Amounts in responses are micro-USDC (1 USDC = 1,000,000).",
-    {
-      app_id: z.number().int().positive().describe("Market application ID"),
-      outcome_index: z.number().int().min(0).max(15).describe("Outcome to refund (0-indexed)"),
-      num_shares: z.number().positive().optional().describe("Optional whole-share count in display units. If omitted, the tool refunds the full indexed position."),
-      wallet_index: z.number().int().min(0).optional().default(0).describe("KMD wallet index"),
-    },
-    safe(async ({ app_id, outcome_index, num_shares, wallet_index }) => {
-      await assertSupportedMarket(app_id, "refund_shares");
-      const account = await getAccount(wallet_index);
-      const state = await getMarketState(algod, app_id);
-      assertMarketStatus(app_id, Number(state.status), [4], "refund shares");
-      const shares = num_shares !== undefined
-        ? sharesFromCount(num_shares)
-        : await getOnChainOutcomeShares(account.addr, app_id, outcome_index);
-      if (shares <= 0n) {
-        throw new Error("No indexed shares available to refund for this outcome.");
-      }
+    server.tool(
+      "claim_lp_fees",
+      "Move earned LP trading fees from the pool's internal accounting into your withdrawable balance. Does not transfer USDC to your wallet; call withdraw_lp_fees to actually receive the funds. Works on ACTIVE, RESOLVED, or CANCELLED markets.",
+      {
+        app_id: z.number().int().positive().describe("Market application ID"),
+        wallet_index: z.number().int().min(0).optional().default(0).describe("KMD wallet index"),
+      },
+      safe(async ({ app_id, wallet_index }) => {
+        await assertSupportedMarket(app_id, "claim_lp_fees");
+        const account = await getAccount(wallet_index);
+        const state = await getMarketState(algod, app_id);
+        assertMarketStatus(app_id, Number(state.status), [1, 5, 4], "claim LP fees");
 
-      const result = await refund(
-        clientConfig(account.addr, account.signer, app_id),
-        outcome_index, Number(state.numOutcomes), usdcAsaId, shares
-      );
+        const result = await claimLpFees(
+          clientConfig(account.addr, account.signer, app_id),
+        );
+        return text({
+          success: true,
+          action: "claim_lp_fees",
+          tx_id: result.txId,
+        });
+      }, "claim_lp_fees")
+    );
 
-      return text({
-        success: true,
-        action: "refund",
-        wallet: account.addr.slice(0, 8) + "...",
-        outcome_index,
-        refunded_shares: result.shares.toString(),
-        refund_amount: result.refundAmount.toString(),
-        tx_id: result.txId,
-      });
-    }, "refund_shares")
-  );
+    server.tool(
+      "withdraw_lp_fees",
+      "Claim and withdraw all available LP trading fees to your wallet in one call. Combines claim_lp_fees + withdrawal into a single operation. Works on ACTIVE, RESOLVED, or CANCELLED markets. Returns the withdrawn USDC amount.",
+      {
+        app_id: z.number().int().positive().describe("Market application ID"),
+        wallet_index: z.number().int().min(0).optional().default(0).describe("KMD wallet index"),
+      },
+      safe(async ({ app_id, wallet_index }) => {
+        await assertSupportedMarket(app_id, "withdraw_lp_fees");
+        const account = await getAccount(wallet_index);
+        const state = await getMarketState(algod, app_id);
+        assertMarketStatus(app_id, Number(state.status), [1, 5, 4], "withdraw LP fees");
+
+        const result = await collectLpFees(
+          clientConfig(account.addr, account.signer, app_id),
+          usdcAsaId,
+        );
+        return text({
+          success: true,
+          action: "withdraw_lp_fees",
+          claim_tx_id: result.claimTxId ?? null,
+          withdraw_tx_id: result.withdrawTxId ?? null,
+          withdrawn_amount: result.withdrawnAmount.toString(),
+        });
+      }, "withdraw_lp_fees")
+    );
+
+    server.tool(
+      "claim_lp_residual",
+      "After a market resolves or is cancelled, withdraw your share of the remaining pool liquidity as an LP. Only callable on RESOLVED or CANCELLED markets. This is separate from LP fees; it returns your principal plus any pool surplus.",
+      {
+        app_id: z.number().int().positive().describe("Market application ID"),
+        wallet_index: z.number().int().min(0).optional().default(0).describe("KMD wallet index"),
+      },
+      safe(async ({ app_id, wallet_index }) => {
+        await assertSupportedMarket(app_id, "claim_lp_residual");
+        const account = await getAccount(wallet_index);
+        const state = await getMarketState(algod, app_id);
+        assertMarketStatus(app_id, Number(state.status), [4, 5], "claim LP residual");
+
+        const result = await claimLpResidual(
+          clientConfig(account.addr, account.signer, app_id),
+          usdcAsaId,
+        );
+        return text({
+          success: true,
+          action: "claim_lp_residual",
+          tx_id: result.txId,
+        });
+      }, "claim_lp_residual")
+    );
+
+    server.tool(
+      "claim_winnings",
+      "Claim winning shares from a RESOLVED market. Auto-detects the winning outcome and your full position if parameters are omitted. Payout is 1 USDC per winning share. Amounts in responses are micro-USDC (1 USDC = 1,000,000).",
+      {
+        app_id: z.number().int().positive().describe("Market application ID"),
+        outcome_index: z.number().int().min(0).max(15).optional().describe("Winning outcome index. If omitted, the tool reads the resolved winning outcome from chain state."),
+        num_shares: z.number().positive().optional().describe("Optional whole-share count in display units. If omitted, the tool claims the full indexed winning position."),
+        wallet_index: z.number().int().min(0).optional().default(0).describe("KMD wallet index"),
+      },
+      safe(async ({ app_id, outcome_index, num_shares, wallet_index }) => {
+        await assertSupportedMarket(app_id, "claim_winnings");
+        const account = await getAccount(wallet_index);
+        const state = await getMarketState(algod, app_id);
+        assertMarketStatus(app_id, Number(state.status), [5], "claim winnings");
+        const resolvedOutcome = outcome_index ?? Number(state.winningOutcome);
+        const shares = num_shares !== undefined
+          ? sharesFromCount(num_shares)
+          : await getOnChainOutcomeShares(account.addr, app_id, resolvedOutcome);
+        if (shares <= 0n) {
+          throw new Error("No indexed winning shares available to claim.");
+        }
+
+        const result = await claim(
+          clientConfig(account.addr, account.signer, app_id),
+          resolvedOutcome, Number(state.numOutcomes), usdcAsaId, shares
+        );
+
+        return text({
+          success: true,
+          action: "claim",
+          wallet: account.addr.slice(0, 8) + "...",
+          outcome_index: resolvedOutcome,
+          claimed_shares: result.shares.toString(),
+          payout: result.payout.toString(),
+          tx_id: result.txId,
+        });
+      }, "claim_winnings")
+    );
+
+    server.tool(
+      "refund_shares",
+      "Refund shares from a CANCELLED market at cost basis. If num_shares is omitted, the tool refunds your full position for the selected outcome. Amounts in responses are micro-USDC (1 USDC = 1,000,000).",
+      {
+        app_id: z.number().int().positive().describe("Market application ID"),
+        outcome_index: z.number().int().min(0).max(15).describe("Outcome to refund (0-indexed)"),
+        num_shares: z.number().positive().optional().describe("Optional whole-share count in display units. If omitted, the tool refunds the full indexed position."),
+        wallet_index: z.number().int().min(0).optional().default(0).describe("KMD wallet index"),
+      },
+      safe(async ({ app_id, outcome_index, num_shares, wallet_index }) => {
+        await assertSupportedMarket(app_id, "refund_shares");
+        const account = await getAccount(wallet_index);
+        const state = await getMarketState(algod, app_id);
+        assertMarketStatus(app_id, Number(state.status), [4], "refund shares");
+        const shares = num_shares !== undefined
+          ? sharesFromCount(num_shares)
+          : await getOnChainOutcomeShares(account.addr, app_id, outcome_index);
+        if (shares <= 0n) {
+          throw new Error("No indexed shares available to refund for this outcome.");
+        }
+
+        const result = await refund(
+          clientConfig(account.addr, account.signer, app_id),
+          outcome_index, Number(state.numOutcomes), usdcAsaId, shares
+        );
+
+        return text({
+          success: true,
+          action: "refund",
+          wallet: account.addr.slice(0, 8) + "...",
+          outcome_index,
+          refunded_shares: result.shares.toString(),
+          refund_amount: result.refundAmount.toString(),
+          tx_id: result.txId,
+        });
+      }, "refund_shares")
+    );
+  }
 
   // ── Onboarding tools ──
 
@@ -1220,14 +1287,24 @@ export function createQuestionMarketServer(config: ServerConfig) {
         const info = await algod.accountInformation(addr).do();
         const algoBalance = Number(info.amount) / 1_000_000;
         const assets = (info.assets ?? []) as any[];
-        const usdcAsset = assets.find((a: any) => Number(a.assetId ?? a["asset-id"]) === usdcAsaId);
-        const usdcBalance = usdcAsset ? Number(usdcAsset.amount) / 1_000_000 : 0;
-        const optedInToUsdc = !!usdcAsset;
+        const usdcAsset = hasTradingConfig
+          ? assets.find((a: any) => Number(a.assetId ?? a["asset-id"]) === usdcAsaId)
+          : undefined;
+        const usdcBalance = hasTradingConfig
+          ? (usdcAsset ? Number(usdcAsset.amount) / 1_000_000 : 0)
+          : null;
+        const optedInToUsdc = hasTradingConfig ? !!usdcAsset : null;
         return text({
           address: addr,
           algo: algoBalance,
           usdc: usdcBalance,
           opted_in_to_usdc: optedInToUsdc,
+          ...(hasTradingConfig
+            ? {}
+            : {
+                warning:
+                  "USDC_ASA_ID is not configured, so USDC balance reporting is disabled. Set USDC_ASA_ID to enable trading tools and USDC-aware balances.",
+              }),
         });
       } catch {
         throw new Error(`Address not found or invalid: ${addr}`);

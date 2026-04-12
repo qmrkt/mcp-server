@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 /**
  * question.market MCP Server — entrypoint
  *
@@ -6,10 +7,11 @@
  */
 
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import * as fs from "fs";
-import * as path from "path";
-import { fileURLToPath } from "url";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { createQuestionMarketServer, type ServerConfig } from "./server.js";
+import { MCP_SERVER_VERSION } from "./version.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -17,11 +19,26 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Config
 // ---------------------------------------------------------------------------
 
-function loadDeployment(): Record<string, string> {
-  for (const p of [
-    path.resolve(__dirname, "../../sdk/protocol-deployment.json"),
-    path.resolve(process.cwd(), "../sdk/protocol-deployment.json"),
-  ]) {
+function deploymentCandidatePaths(searchRoot: string): string[] {
+  return [
+    path.resolve(searchRoot, "protocol-deployment.json"),
+    path.resolve(searchRoot, "sdk/protocol-deployment.json"),
+    path.resolve(searchRoot, "../sdk/protocol-deployment.json"),
+    path.resolve(searchRoot, "../question/sdk/protocol-deployment.json"),
+    path.resolve(searchRoot, "../question-sdk/protocol-deployment.json"),
+  ];
+}
+
+export function loadDeployment(): Record<string, string> {
+  const roots = [
+    path.resolve(__dirname, ".."),
+    process.cwd(),
+    path.resolve(process.cwd(), ".."),
+  ];
+
+  const candidates = Array.from(new Set(roots.flatMap(deploymentCandidatePaths)));
+
+  for (const p of candidates) {
     try {
       const d = JSON.parse(fs.readFileSync(p, "utf8"));
       return {
@@ -34,40 +51,80 @@ function loadDeployment(): Record<string, string> {
   return {};
 }
 
-const dep = loadDeployment();
+export function createRuntimeConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
+  const dep = loadDeployment();
 
-const config: ServerConfig = {
-  indexerUrl: process.env.INDEXER_URL || "https://question.market/api",
-  indexerAuth: process.env.INDEXER_AUTH || "",
-  indexerWriteToken: process.env.INDEXER_WRITE_TOKEN || "",
-  algodServer: process.env.ALGOD_SERVER || "https://testnet-api.4160.nodely.dev",
-  algodPort: Number(process.env.ALGOD_PORT || "443"),
-  algodToken: process.env.ALGOD_TOKEN || "",
-  kmdServer: process.env.KMD_SERVER || "http://localhost",
-  kmdPort: Number(process.env.KMD_PORT || "4002"),
-  kmdToken: process.env.KMD_TOKEN || "a".repeat(64),
-  factoryAppId: Number(process.env.FACTORY_APP_ID || dep.FACTORY_APP_ID || "0"),
-  protocolConfigAppId: Number(process.env.PROTOCOL_CONFIG_APP_ID || dep.PROTOCOL_CONFIG_APP_ID || "0"),
-  usdcAsaId: Number(process.env.USDC_ASA_ID || dep.USDC_ASA_ID || "0"),
-  agentMnemonic: process.env.AGENT_MNEMONIC || "",
-  faucetUrl: process.env.FAUCET_URL || "https://question.market/api/faucet",
-};
+  return {
+    indexerUrl: env.INDEXER_URL || "https://question.market/api",
+    indexerAuth: env.INDEXER_AUTH || "",
+    indexerWriteToken: env.INDEXER_WRITE_TOKEN || "",
+    algodServer: env.ALGOD_SERVER || "https://testnet-api.4160.nodely.dev",
+    algodPort: Number(env.ALGOD_PORT || "443"),
+    algodToken: env.ALGOD_TOKEN || "",
+    kmdServer: env.KMD_SERVER || "http://localhost",
+    kmdPort: Number(env.KMD_PORT || "4002"),
+    kmdToken: env.KMD_TOKEN || "a".repeat(64),
+    factoryAppId: Number(env.FACTORY_APP_ID || dep.FACTORY_APP_ID || "0"),
+    protocolConfigAppId: Number(env.PROTOCOL_CONFIG_APP_ID || dep.PROTOCOL_CONFIG_APP_ID || "0"),
+    usdcAsaId: Number(env.USDC_ASA_ID || dep.USDC_ASA_ID || "0"),
+    agentMnemonic: env.AGENT_MNEMONIC || "",
+    faucetUrl: env.FAUCET_URL || "https://question.market/api/faucet",
+  };
+}
+
+function startupWarnings(config: ServerConfig): string[] {
+  const warnings: string[] = [];
+
+  if (config.usdcAsaId <= 0) {
+    warnings.push(
+      "USDC_ASA_ID is not configured. Trading, LP, claims, refunds, and USDC-aware balances are disabled."
+    );
+  }
+
+  if (config.usdcAsaId > 0 && (config.factoryAppId <= 0 || config.protocolConfigAppId <= 0)) {
+    warnings.push(
+      "FACTORY_APP_ID and PROTOCOL_CONFIG_APP_ID are required to enable create_market outside the monorepo."
+    );
+  }
+
+  if (!config.indexerWriteToken) {
+    warnings.push(
+      "INDEXER_WRITE_TOKEN is not configured. set_market_image is disabled and create_market image uploads will be skipped."
+    );
+  }
+
+  return warnings;
+}
 
 // ---------------------------------------------------------------------------
 // Start
 // ---------------------------------------------------------------------------
 
-async function main() {
+export async function main(config: ServerConfig = createRuntimeConfig()) {
   const { server } = createQuestionMarketServer(config);
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("[mcp] question.market MCP server v0.3.0");
+  console.error(`[mcp] question.market MCP server v${MCP_SERVER_VERSION}`);
   console.error(
     `[mcp] Indexer: ${config.indexerUrl}  Factory: ${config.factoryAppId}  USDC: ${config.usdcAsaId}`
   );
+  for (const warning of startupWarnings(config)) {
+    console.error(`[mcp] ${warning}`);
+  }
 }
 
-main().catch((err) => {
-  console.error("[mcp] Fatal:", err);
-  process.exit(1);
-});
+function isExecutedDirectly(): boolean {
+  if (!process.argv[1]) return false;
+  try {
+    return fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isExecutedDirectly()) {
+  main().catch((err) => {
+    console.error("[mcp] Fatal:", err);
+    process.exit(1);
+  });
+}

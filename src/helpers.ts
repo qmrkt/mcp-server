@@ -1,9 +1,9 @@
 import algosdk from "algosdk";
-import { compileResolutionBlueprint } from "@question/sdk/blueprints";
+import { compileResolutionBlueprint } from "@questionmarket/sdk/blueprints";
 import type {
   MarketTemplateContext,
   ResolutionBlueprint,
-} from "@question/sdk/blueprints";
+} from "@questionmarket/sdk/blueprints";
 
 // ---------------------------------------------------------------------------
 // Text / error formatting

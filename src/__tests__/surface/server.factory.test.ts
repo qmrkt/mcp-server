@@ -59,7 +59,43 @@ describe("server factory", () => {
     expect(parsed.tools.write).toContain("claim_lp_residual");
     expect(parsed.tools.write).toContain("claim_winnings");
     expect(parsed.tools.write).toContain("refund_shares");
+    expect(parsed.configuration.trading_enabled).toBe(true);
+    expect(parsed.configuration.create_market_enabled).toBe(true);
+    expect(parsed.configuration.set_market_image_enabled).toBe(true);
+    expect(parsed.configuration.disabled_write_tools).toEqual([]);
     expect(parsed.resources).toContain("market://{appId}");
+  });
+
+  it("hides write tools when deployment ids are missing", async () => {
+    harness = await createSurfaceHarness({
+      factoryAppId: 0,
+      protocolConfigAppId: 0,
+      usdcAsaId: 0,
+      indexerWriteToken: "",
+    });
+
+    const result = await harness.client.listTools();
+    const names = result.tools.map((t) => t.name);
+
+    expect(names).not.toContain("create_market");
+    expect(names).not.toContain("buy_shares");
+    expect(names).not.toContain("sell_shares");
+    expect(names).not.toContain("enter_lp_active");
+    expect(names).not.toContain("claim_winnings");
+    expect(names).not.toContain("refund_shares");
+    expect(names).not.toContain("set_market_image");
+
+    const { parsed } = await callTool(harness.client, "question_market");
+    expect(parsed.tools.write).toEqual([]);
+    expect(parsed.configuration.trading_enabled).toBe(false);
+    expect(parsed.configuration.create_market_enabled).toBe(false);
+    expect(parsed.configuration.set_market_image_enabled).toBe(false);
+    expect(parsed.configuration.disabled_write_tools).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ tools: ["create_market"] }),
+        expect.objectContaining({ tools: ["set_market_image"] }),
+      ]),
+    );
   });
 
   it("create_wallet returns valid address and 25-word mnemonic", async () => {

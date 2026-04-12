@@ -1,29 +1,44 @@
 {
-  "name": "@question/mcp-server",
-  "version": "0.1.0",
+  "name": "@questionmarket/mcp",
+  "version": "0.1.1",
   "description": "MCP server for question.market prediction markets on Algorand",
   "type": "module",
-  "main": "src/index.ts",
-  "bin": {
-    "question-mcp": "src/index.ts"
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
   },
+  "bin": {
+    "question-mcp": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
   "scripts": {
+    "build": "tsc -p tsconfig.build.json",
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run --exclude 'src/__tests__/e2e/**'",
-    "test:e2e": "vitest run src/__tests__/e2e"
+    "test:unit": "vitest run --exclude 'src/__tests__/e2e/**'",
+    "test:runtime": "node ./scripts/test-runtime-dist.mjs",
+    "test:e2e": "vitest run src/__tests__/e2e",
+    "test": "npm run build && npm run test:unit && npm run test:runtime",
+    "pack:check": "npm pack --dry-run",
+    "prepublishOnly": "npm test && npm run pack:check"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
-    "@question/sdk": "^0.1.0",
+    "@questionmarket/sdk": "^0.1.0",
     "algosdk": "^3.5.2",
     "zod": "^3.24.0"
   },
   "devDependencies": {
     "@types/node": "^22.13.10",
-    "typescript": "^5.9.2",
     "tsx": "^4.21.0",
+    "typescript": "^5.9.2",
     "vitest": "^2.1.9"
   },
   "repository": {
@@ -32,5 +47,8 @@
   },
   "license": "MIT",
   "author": "Andrei Savin <andrei@andreisavin.com>",
-  "homepage": "https://question.market"
+  "homepage": "https://question.market",
+  "engines": {
+    "node": ">=18"
+  }
 }

@@ -6,7 +6,7 @@ import {
   fundAndOptInAccount,
   type E2EHarness,
 } from "./setup.js";
-import { getMarketState } from "@question/sdk/clients/question-market";
+import { getMarketState } from "@questionmarket/sdk/clients/question-market";
 
 async function withHarness(run: (h: E2EHarness) => Promise<void>) {
   const h = await createE2EHarness();

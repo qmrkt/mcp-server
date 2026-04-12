@@ -11,7 +11,7 @@ import { createQuestionMarketServer, type ServerConfig } from "../../server.js";
 export const STUB_CONFIG: ServerConfig = {
   indexerUrl: "http://stub-indexer:9999",
   indexerAuth: "",
-  indexerWriteToken: "",
+  indexerWriteToken: "stub-write-token",
   algodServer: "http://stub-algod",
   algodPort: 4001,
   algodToken: "a".repeat(64),

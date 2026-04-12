@@ -18,7 +18,7 @@ import {
   proposeResolution,
   finalizeResolution,
   cancel,
-} from "@question/sdk/clients/question-market";
+} from "@questionmarket/sdk/clients/question-market";
 
 let h: E2EHarness;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));

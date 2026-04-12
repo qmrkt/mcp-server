@@ -10,7 +10,7 @@ import {
   buildDefaultHumanJudgeBlueprint,
   compileCreateMarketBlueprint,
 } from "../helpers.js";
-import type { ResolutionBlueprint } from "@question/sdk/blueprints";
+import type { ResolutionBlueprint } from "@questionmarket/sdk/blueprints";
 
 // ---------------------------------------------------------------------------
 // text()
