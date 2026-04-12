@@ -720,17 +720,19 @@ export function createQuestionMarketServer(config: ServerConfig) {
 
   server.tool(
     "create_market",
-    `Create a new prediction market atomically. Supports 2-${MAX_ACTIVE_LP_OUTCOMES} outcomes. Optional custom blueprint JSON is validated and compiled with the same rules as the frontend editor.`,
+    `Create a new prediction market atomically. Supports 2-${MAX_ACTIVE_LP_OUTCOMES} outcomes. Provide blueprint to use the same logic for both main and dispute paths, or main_blueprint and dispute_blueprint to author them separately. All custom blueprint JSON is validated and compiled with the same rules as the frontend editor.`,
     {
       question: z.string().max(1000).describe("The question for the market (max 1000 chars)"),
       outcomes: z.array(z.string().max(200)).min(2).max(MAX_ACTIVE_LP_OUTCOMES).describe(`Outcome labels (2-${MAX_ACTIVE_LP_OUTCOMES}, created atomically in one on-chain group)`),
       liquidity_usdc: z.number().positive().default(50).describe("Initial liquidity in USDC (default 50)"),
       deadline_hours: z.number().positive().max(8760).default(24).describe("Hours until market deadline (default 24, max 8760 = 1 year)"),
       lp_entry_max_price: z.number().gt(0).lte(1).default(DEFAULT_LP_ENTRY_MAX_PRICE_FP / 1_000_000).describe("Immutable LP skew cap as a probability from 0 to 1 (default 0.8)"),
-      blueprint: blueprintInputSchema.optional(),
+      blueprint: blueprintInputSchema.optional().describe("Shared blueprint for both main and dispute paths."),
+      main_blueprint: blueprintInputSchema.optional().describe("Optional main-path blueprint JSON. Overrides blueprint for the main path."),
+      dispute_blueprint: blueprintInputSchema.optional().describe("Optional dispute-path blueprint JSON. Overrides blueprint for the dispute path."),
       image_url: z.string().url().optional().describe("URL of an image to use as market thumbnail (JPEG, PNG, or WebP, max 2MB). Downloaded and stored by the indexer."),
     },
-    safe(async ({ question, outcomes, liquidity_usdc, deadline_hours, lp_entry_max_price, blueprint, image_url }) => {
+    safe(async ({ question, outcomes, liquidity_usdc, deadline_hours, lp_entry_max_price, blueprint, main_blueprint, dispute_blueprint, image_url }) => {
       const account = await getAccount(0);
       const liquidityMicro = BigInt(liquidity_usdc * 1_000_000);
       const lpEntryMaxPriceFp = BigInt(Math.round(lp_entry_max_price * 1_000_000));
@@ -741,7 +743,23 @@ export function createQuestionMarketServer(config: ServerConfig) {
       const blockTs = Number(block.block.header.timestamp);
       const deadline = blockTs + Math.floor(deadline_hours * 3600);
       const notePayload = JSON.stringify({ q: question, o: outcomes });
-      const compiledBlueprint = compileCreateMarketBlueprint(question, outcomes, deadline, blueprint);
+      const sharedBlueprint = blueprint;
+      const compiledMainBlueprint = compileCreateMarketBlueprint(
+        question,
+        outcomes,
+        deadline,
+        main_blueprint ?? sharedBlueprint,
+      );
+      const compiledDisputeBlueprint = compileCreateMarketBlueprint(
+        question,
+        outcomes,
+        deadline,
+        dispute_blueprint ?? sharedBlueprint,
+      );
+      const blueprintSource =
+        compiledMainBlueprint.source === compiledDisputeBlueprint.source
+          ? compiledMainBlueprint.source
+          : "mixed";
 
       let atomicResult: Awaited<ReturnType<typeof createMarketAtomic>>;
       try {
@@ -753,8 +771,8 @@ export function createQuestionMarketServer(config: ServerConfig) {
             numOutcomes: outcomes.length,
             initialB: 0n,
             lpFeeBps: 200,
-            mainBlueprint: compiledBlueprint.bytes,
-            disputeBlueprint: compiledBlueprint.bytes,
+            mainBlueprint: compiledMainBlueprint.bytes,
+            disputeBlueprint: compiledDisputeBlueprint.bytes,
             deadline,
             challengeWindowSecs: 3600,
             cancellable: true,
@@ -802,7 +820,9 @@ export function createQuestionMarketServer(config: ServerConfig) {
         appId: atomicResult.marketAppId,
         question,
         outcomes,
-        blueprint_source: compiledBlueprint.source,
+        blueprint_source: blueprintSource,
+        main_blueprint_source: compiledMainBlueprint.source,
+        dispute_blueprint_source: compiledDisputeBlueprint.source,
         liquidity: `${liquidity_usdc} USDC`,
         lp_entry_max_price,
         deadline: new Date(deadline * 1000).toISOString(),

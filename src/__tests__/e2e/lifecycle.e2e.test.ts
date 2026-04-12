@@ -22,6 +22,48 @@ import {
 
 let h: E2EHarness;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const CUSTOM_MAIN_BLUEPRINT = {
+  id: "test-human-main",
+  version: 1,
+  nodes: [
+    {
+      id: "judge",
+      type: "human_judge",
+      config: {
+        prompt:
+          "Question: {{market.question}}\n" +
+          "Outcomes: {{market.outcomes.indexed}}\n\n" +
+          "Select the correct outcome index.",
+        allowed_responders: ["creator"],
+        timeout_seconds: 86400,
+        require_reason: true,
+        allow_cancel: false,
+      },
+    },
+    {
+      id: "submit",
+      type: "submit_result",
+      config: { outcome_key: "judge.outcome" },
+    },
+    {
+      id: "cancel",
+      type: "cancel_market",
+      config: { reason: "Timed out" },
+    },
+  ],
+  edges: [
+    {
+      from: "judge",
+      to: "submit",
+      condition: "judge.status == 'responded' && judge.outcome != ''",
+    },
+    {
+      from: "judge",
+      to: "cancel",
+      condition: "judge.status == 'timeout'",
+    },
+  ],
+};
 
 beforeAll(async () => {
   const sdkRoot = path.resolve(__dirname, "../../../../sdk");
@@ -87,6 +129,23 @@ describe("lifecycle", () => {
     expect(isError).toBe(false);
     expect(parsed.appId).toBeGreaterThan(0);
     expect(parsed.outcomes).toEqual(["A", "B", "C"]);
+  }, 60_000);
+
+  it("create_market accepts a distinct main blueprint while keeping the dispute path default", async () => {
+    const { parsed, isError } = await callTool(h.client, "create_market", {
+      question: "E2E: mixed blueprint sources",
+      outcomes: ["Yes", "No"],
+      liquidity_usdc: 50,
+      deadline_hours: 24,
+      main_blueprint: CUSTOM_MAIN_BLUEPRINT,
+    });
+
+    expect(isError).toBe(false);
+    expect(parsed.success).toBe(true);
+    expect(parsed.appId).toBeGreaterThan(0);
+    expect(parsed.blueprint_source).toBe("mixed");
+    expect(parsed.main_blueprint_source).toBe("custom");
+    expect(parsed.dispute_blueprint_source).toBe("default");
   }, 60_000);
 
   it("buy_shares shifts price upward", async () => {
