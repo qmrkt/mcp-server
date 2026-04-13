@@ -9,6 +9,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import algosdk from "algosdk";
+import { createHash } from "node:crypto";
 import {
   text,
   safe,
@@ -104,6 +105,15 @@ export function createQuestionMarketServer(config: ServerConfig) {
   const hasTradingConfig = usdcAsaId > 0;
   const hasCreateMarketConfig = hasTradingConfig && factoryAppId > 0 && protocolConfigAppId > 0;
   const hasImageUploadConfig = pinataJwt.length > 0;
+
+  function deriveBlueprintCid(mainBlueprint: Uint8Array, disputeBlueprint: Uint8Array): Uint8Array {
+    const digest = createHash("sha256")
+      .update(mainBlueprint)
+      .update(new Uint8Array([0]))
+      .update(disputeBlueprint)
+      .digest("hex");
+    return textEncoder.encode(`qm-blueprint:${digest}`);
+  }
 
   const indexer = new IndexerClient({ baseUrl: indexerUrl, auth: indexerAuth || undefined });
   const ipfs = pinataJwt
@@ -856,8 +866,7 @@ export function createQuestionMarketServer(config: ServerConfig) {
               numOutcomes: outcomes.length,
               initialB: 0n,
               lpFeeBps: 200,
-              mainBlueprint: compiledMainBlueprint.bytes,
-              disputeBlueprint: compiledDisputeBlueprint.bytes,
+              blueprintCid: deriveBlueprintCid(compiledMainBlueprint.bytes, compiledDisputeBlueprint.bytes),
               deadline,
               challengeWindowSecs: 3600,
               cancellable: true,
