@@ -142,47 +142,62 @@ export function generateWallet(): { address: string; mnemonic: string } {
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
-export function buildDefaultHumanJudgeBlueprint(
+export function buildDefaultAwaitSignalBlueprint(
   _question: string,
   _outcomes: string[]
 ): Uint8Array {
   return textEncoder.encode(
     JSON.stringify({
-      id: "mcp-human-judge",
+      id: "mcp-await-signal",
       version: 1,
       nodes: [
         {
-          id: "judge",
-          type: "human_judge",
+          id: "review",
+          type: "await_signal",
           config: {
-            prompt:
+            reason:
               "Question: {{market.question}}\n" +
               "Outcomes: {{market.outcomes.indexed}}\n\n" +
-              "Return the correct outcome index.",
-            allowed_responders: ["creator"],
+              "Return the correct outcome index with a short reason.",
+            signal_type: "human_judgment.responded",
             timeout_seconds: 86400,
-            require_reason: true,
-            allow_cancel: false,
+            required_payload: ["outcome", "reason"],
           },
         },
         {
-          id: "submit",
-          type: "submit_result",
-          config: { outcome_key: "judge.outcome" },
+          id: "success",
+          type: "return",
+          config: {
+            value: {
+              status: "success",
+              outcome: "{{results.review.outcome}}",
+              reason: "{{results.review.reason}}",
+            },
+          },
         },
         {
-          id: "cancel",
-          type: "cancel_market",
-          config: { reason: "MCP human judge timed out" },
+          id: "cancelled",
+          type: "return",
+          config: {
+            value: {
+              status: "cancelled",
+              reason: "MCP await_signal review timed out",
+            },
+          },
         },
       ],
       edges: [
         {
-          from: "judge",
-          to: "submit",
-          condition: "judge.status == 'responded' && judge.outcome != ''",
+          from: "review",
+          to: "success",
+          condition: "results.review.status == 'responded' && results.review.outcome != ''",
         },
-        { from: "judge", to: "cancel", condition: "judge.status == 'timeout'" },
+        {
+          from: "review",
+          to: "cancelled",
+          condition:
+            "results.review.status == 'timeout' || results.review.status == 'cancelled'",
+        },
       ],
     })
   );
@@ -222,7 +237,7 @@ function parseDefaultBlueprint(
   outcomes: string[]
 ): ResolutionBlueprint {
   return JSON.parse(
-    textDecoder.decode(buildDefaultHumanJudgeBlueprint(question, outcomes))
+    textDecoder.decode(buildDefaultAwaitSignalBlueprint(question, outcomes))
   ) as ResolutionBlueprint;
 }
 

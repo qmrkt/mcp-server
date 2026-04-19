@@ -6,7 +6,7 @@ import {
   safe,
   getMnemonicAccount,
   generateWallet,
-  buildDefaultHumanJudgeBlueprint,
+  buildDefaultAwaitSignalBlueprint,
   compileCreateMarketBlueprint,
 } from "../helpers.js";
 import type { ResolutionBlueprint } from "@questionmarket/sdk/blueprints";
@@ -301,46 +301,46 @@ describe("generateWallet", () => {
 });
 
 // ---------------------------------------------------------------------------
-// buildDefaultHumanJudgeBlueprint()
+// buildDefaultAwaitSignalBlueprint()
 // ---------------------------------------------------------------------------
 
-describe("buildDefaultHumanJudgeBlueprint", () => {
+describe("buildDefaultAwaitSignalBlueprint", () => {
   it("returns valid JSON as Uint8Array", () => {
-    const result = buildDefaultHumanJudgeBlueprint("Will it rain?", ["Yes", "No"]);
+    const result = buildDefaultAwaitSignalBlueprint("Will it rain?", ["Yes", "No"]);
     expect(result).toBeInstanceOf(Uint8Array);
     const parsed = JSON.parse(new TextDecoder().decode(result));
-    expect(parsed.id).toBe("mcp-human-judge");
+    expect(parsed.id).toBe("mcp-await-signal");
     expect(parsed.version).toBe(1);
   });
 
-  it("includes outcome template token in the prompt", () => {
-    const result = buildDefaultHumanJudgeBlueprint("Test?", ["A", "B", "C"]);
+  it("includes outcome template token in the reason", () => {
+    const result = buildDefaultAwaitSignalBlueprint("Test?", ["A", "B", "C"]);
     const parsed = JSON.parse(new TextDecoder().decode(result));
-    const prompt = parsed.nodes[0].config.prompt;
-    expect(prompt).toContain("{{market.outcomes.indexed}}");
+    const reason = parsed.nodes[0].config.reason;
+    expect(reason).toContain("{{market.outcomes.indexed}}");
   });
 
   it("has three nodes: judge, submit, cancel", () => {
-    const result = buildDefaultHumanJudgeBlueprint("Q?", ["Yes", "No"]);
+    const result = buildDefaultAwaitSignalBlueprint("Q?", ["Yes", "No"]);
     const parsed = JSON.parse(new TextDecoder().decode(result));
     expect(parsed.nodes).toHaveLength(3);
-    expect(parsed.nodes.map((n: any) => n.id)).toEqual(["judge", "submit", "cancel"]);
+    expect(parsed.nodes.map((n: any) => n.id)).toEqual(["review", "success", "cancelled"]);
   });
 
   it("has two edges", () => {
-    const result = buildDefaultHumanJudgeBlueprint("Q?", ["Yes", "No"]);
+    const result = buildDefaultAwaitSignalBlueprint("Q?", ["Yes", "No"]);
     const parsed = JSON.parse(new TextDecoder().decode(result));
     expect(parsed.edges).toHaveLength(2);
-    expect(parsed.edges[0].from).toBe("judge");
-    expect(parsed.edges[0].to).toBe("submit");
-    expect(parsed.edges[1].to).toBe("cancel");
+    expect(parsed.edges[0].from).toBe("review");
+    expect(parsed.edges[0].to).toBe("success");
+    expect(parsed.edges[1].to).toBe("cancelled");
   });
 
-  it("includes question token in prompt for compile-time substitution", () => {
-    const result = buildDefaultHumanJudgeBlueprint("Will BTC hit 100K?", ["Yes", "No"]);
+  it("includes question token in reason for compile-time substitution", () => {
+    const result = buildDefaultAwaitSignalBlueprint("Will BTC hit 100K?", ["Yes", "No"]);
     const parsed = JSON.parse(new TextDecoder().decode(result));
-    expect(parsed.nodes[0].config.prompt).toContain("{{market.question}}");
-    expect(parsed.nodes[0].config.prompt).toContain("{{market.outcomes.indexed}}");
+    expect(parsed.nodes[0].config.reason).toContain("{{market.question}}");
+    expect(parsed.nodes[0].config.reason).toContain("{{market.outcomes.indexed}}");
   });
 });
 
@@ -350,30 +350,34 @@ describe("buildDefaultHumanJudgeBlueprint", () => {
 
 describe("compileCreateMarketBlueprint", () => {
   const customBlueprint: ResolutionBlueprint = {
-    id: "custom-human-judge",
+    id: "custom-await-signal",
     version: 1,
     nodes: [
       {
-        id: "judge",
-        type: "human_judge",
+        id: "review",
+        type: "await_signal",
         position: { x: 0, y: 0 },
         config: {
-          prompt:
+          reason:
             "Question: {{market.question}}\nOutcomes: {{market.outcomes.indexed}}\n\nSelect the correct outcome.",
-          allowed_responders: ["creator"],
+          signal_type: "human_judgment.responded",
           timeout_seconds: 3600,
+          required_payload: ["outcome"],
         },
       },
       {
-        id: "submit",
-        type: "submit_result",
+        id: "success",
+        type: "return",
         position: { x: 320, y: 0 },
         config: {
-          outcome_key: "judge.outcome",
+          value: {
+            status: "success",
+            outcome: "{{results.review.outcome}}",
+          },
         },
       },
     ],
-    edges: [{ from: "judge", to: "submit", condition: "judge.status == 'responded'" }],
+    edges: [{ from: "review", to: "success", condition: "results.review.status == 'responded'" }],
   };
 
   it("uses the default MCP blueprint when none is provided", () => {
@@ -386,7 +390,7 @@ describe("compileCreateMarketBlueprint", () => {
 
     const parsed = JSON.parse(new TextDecoder().decode(result.bytes));
     expect(parsed.nodes).toHaveLength(3);
-    expect(parsed.nodes[0].config.prompt).toContain("Will it rain?");
+    expect(parsed.nodes[0].config.reason).toContain("Will it rain?");
   });
 
   it("accepts a custom blueprint object and compiles template tokens", () => {
@@ -399,8 +403,8 @@ describe("compileCreateMarketBlueprint", () => {
     expect(result.source).toBe("custom");
 
     const parsed = JSON.parse(new TextDecoder().decode(result.bytes));
-    expect(parsed.nodes[0].config.prompt).toContain("Will BTC hit 100K?");
-    expect(parsed.nodes[0].config.prompt).toContain("0: Yes, 1: No");
+    expect(parsed.nodes[0].config.reason).toContain("Will BTC hit 100K?");
+    expect(parsed.nodes[0].config.reason).toContain("0: Yes, 1: No");
     expect(parsed.nodes[0].position).toBeUndefined();
   });
 
@@ -444,13 +448,13 @@ describe("compileCreateMarketBlueprint", () => {
         ["A", "B"],
         1_746_384_000,
         {
-          id: "invalid-submit",
+          id: "invalid-return",
           version: 1,
-          nodes: [{ id: "submit", type: "submit_result", config: {} }],
+          nodes: [{ id: "done", type: "return", config: { value: {} } }],
           edges: [],
         }
       )
-    ).toThrow('Blueprint invalid: Node "submit" needs an outcome source.');
+    ).toThrow('Blueprint invalid: Node "done" must include a non-empty value.status string.');
   });
 
   it("redacts mnemonic material from classified errors", () => {

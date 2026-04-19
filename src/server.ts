@@ -284,8 +284,6 @@ export function createQuestionMarketServer(config: ServerConfig) {
     claimableFees: string;
   };
 
-  type IndexerMarket = Record<string, unknown>;
-
   const MICRO_UNITS = 1_000_000;
   const UNSUPPORTED_CONTRACT_VERSION_PREFIX = "Unsupported market version:";
 
@@ -475,8 +473,7 @@ export function createQuestionMarketServer(config: ServerConfig) {
 
     const marketResults = await Promise.allSettled(
       appIds.map(async (appId) => {
-        const raw = (await indexer.getMarket(appId)) as IndexerMarket
-        return [appId, normalizeIndexerMarket(raw)] as const
+        return [appId, await getIndexedMarket(appId)] as const
       })
     );
 
@@ -650,7 +647,7 @@ export function createQuestionMarketServer(config: ServerConfig) {
   const blueprintInputSchema = z
     .union([z.string(), z.object({}).passthrough()])
     .describe(
-      "Optional public V1 blueprint JSON object or JSON string. If omitted, the MCP server uses its default human_judge blueprint. When provided, the blueprint is validated and compiled with the same rules as the frontend editor."
+      "Optional public blueprint JSON object or JSON string. If omitted, the MCP server uses its default await_signal blueprint. When provided, the blueprint is validated and compiled with the same rules as the frontend editor."
     );
 
   // ── Overview ──

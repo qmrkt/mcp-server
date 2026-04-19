@@ -8,6 +8,7 @@
 
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createQuestionMarketServer, type ServerConfig } from "./server.js";
@@ -29,14 +30,23 @@ function deploymentCandidatePaths(searchRoot: string): string[] {
   ];
 }
 
-export function loadDeployment(): Record<string, string> {
+export function loadDeployment(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
   const roots = [
     path.resolve(__dirname, ".."),
     process.cwd(),
     path.resolve(process.cwd(), ".."),
   ];
-
-  const candidates = Array.from(new Set(roots.flatMap(deploymentCandidatePaths)));
+  const explicitPaths = [
+    env.QUESTION_MARKET_DEPLOYMENT_PATH,
+    env.QUESTION_MARKET_DEPLOYMENT_OUT,
+    path.join(os.tmpdir(), "question-sdk-localnet-deployment.json"),
+  ].filter((value): value is string => Boolean(value));
+  const candidates = Array.from(
+    new Set([
+      ...explicitPaths.map((candidate) => path.resolve(candidate)),
+      ...roots.flatMap(deploymentCandidatePaths),
+    ])
+  );
 
   for (const p of candidates) {
     try {
@@ -52,7 +62,7 @@ export function loadDeployment(): Record<string, string> {
 }
 
 export function createRuntimeConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
-  const dep = loadDeployment();
+  const dep = loadDeployment(env);
 
   return {
     indexerUrl: env.INDEXER_URL || "https://question.market/api",

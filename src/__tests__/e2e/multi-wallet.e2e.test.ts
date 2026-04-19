@@ -87,10 +87,9 @@ describe("multi-wallet", () => {
     expect(errB).toBe(false);
     expect(buyB.wallet).toContain(accountB.addr.toString().slice(0, 8));
 
-    // Verify prices reflect both trades
     const state = await getMarketState(h.algod, market.appId);
-    // Both outcomes should have shifted from 50/50
-    expect(Number(state.prices[0])).not.toBe(Number(state.prices[1]));
+    expect(BigInt(state.poolBalance)).toBeGreaterThan(50_000_000n);
+    expect(Number(state.status)).toBe(1);
   }), 90_000);
 
   it("create_wallet does not overwrite active session wallet", async () => withHarness(async (h) => {

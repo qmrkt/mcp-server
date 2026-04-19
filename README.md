@@ -82,7 +82,7 @@ Example:
 }
 ```
 
-If you run this package beside a checkout of `~/Projects26/question` or `~/Projects26/question-sdk`, it will also try to auto-discover `protocol-deployment.json`. Published installs should still set the app IDs explicitly.
+For local development, the server also looks for a deployment file via `QUESTION_MARKET_DEPLOYMENT_PATH`, `QUESTION_MARKET_DEPLOYMENT_OUT`, the SDK's shared temp cache, and the older monorepo `protocol-deployment.json` locations. Published installs should still set the app IDs explicitly.
 
 ## Verify it works
 

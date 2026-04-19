@@ -6,7 +6,9 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import algosdk from "algosdk";
+import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createQuestionMarketServer, type ServerConfig } from "../../server.js";
@@ -25,9 +27,125 @@ export interface Deployment {
   usdcAsaId: number;
 }
 
+const SHARED_DEPLOYMENT_PATH = path.join(os.tmpdir(), "question-sdk-localnet-deployment.json");
+
+function deploymentCandidates(): string[] {
+  return [
+    process.env.QUESTION_MARKET_DEPLOYMENT_PATH,
+    process.env.QUESTION_MARKET_DEPLOYMENT_OUT,
+    SHARED_DEPLOYMENT_PATH,
+    path.resolve(__dirname, "../../../../sdk/protocol-deployment.json"),
+    path.resolve(__dirname, "../../../sdk/protocol-deployment.json"),
+    path.resolve(__dirname, "../../../../question-sdk/protocol-deployment.json"),
+    path.resolve(__dirname, "../../../../question/sdk/protocol-deployment.json"),
+  ].filter((value): value is string => Boolean(value));
+}
+
+function parseDeployment(filePath: string): Deployment | undefined {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8")) as Deployment;
+  } catch {
+    return undefined;
+  }
+}
+
 export function loadDeployment(): Deployment {
-  const p = path.resolve(__dirname, "../../../../sdk/protocol-deployment.json");
-  return JSON.parse(fs.readFileSync(p, "utf8"));
+  const candidates = deploymentCandidates();
+  for (const p of candidates) {
+    if (!fs.existsSync(p)) continue;
+    const deployment = parseDeployment(p);
+    if (deployment) return deployment;
+  }
+  throw new Error(`protocol-deployment.json not found in: ${candidates.join(", ")}`);
+}
+
+function sdkCandidates(): string[] {
+  return [
+    path.resolve(__dirname, "../../../../sdk"),
+    path.resolve(__dirname, "../../../../question-sdk"),
+    path.resolve(__dirname, "../../../../question/sdk"),
+  ];
+}
+
+function findSdkRoot(): string {
+  const sdkRoot = sdkCandidates().find((candidate) =>
+    fs.existsSync(path.resolve(candidate, "package.json"))
+  );
+  if (!sdkRoot) throw new Error(`SDK not found in: ${sdkCandidates().join(", ")}`);
+  return sdkRoot;
+}
+
+async function deploymentIsUsable(
+  algod: algosdk.Algodv2,
+  deployment: Deployment | undefined
+): Promise<boolean> {
+  if (!deployment) return false;
+  try {
+    await algod.getApplicationByID(deployment.marketFactoryAppId).do();
+    await algod.getApplicationByID(deployment.protocolConfigAppId).do();
+    await algod.getAssetByID(deployment.usdcAsaId).do();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function deployLocalnetProtocol(sdkRoot: string): void {
+  const tsxCli = path.resolve(sdkRoot, "node_modules/tsx/dist/cli.mjs");
+  const srcScript = path.resolve(sdkRoot, "src/scripts/deploy-localnet.ts");
+  const distScript = path.resolve(sdkRoot, "dist/scripts/deploy-localnet.js");
+  const env = {
+    ...process.env,
+    QUESTION_MARKET_DEPLOYMENT_OUT: SHARED_DEPLOYMENT_PATH,
+  };
+
+  if (fs.existsSync(srcScript)) {
+    if (!fs.existsSync(tsxCli)) {
+      throw new Error(`tsx CLI not found at ${tsxCli}`);
+    }
+    execFileSync(process.execPath, [tsxCli, "src/scripts/deploy-localnet.ts"], {
+      cwd: sdkRoot,
+      stdio: "pipe",
+      env,
+    });
+    return;
+  }
+
+  if (!fs.existsSync(distScript)) {
+    throw new Error(`deploy-localnet script not found in ${sdkRoot}`);
+  }
+
+  execFileSync(process.execPath, [distScript], {
+    cwd: sdkRoot,
+    stdio: "pipe",
+    env,
+  });
+}
+
+export async function ensureLocalnetDeployment(algod: algosdk.Algodv2): Promise<Deployment> {
+  const current = parseDeployment(SHARED_DEPLOYMENT_PATH);
+  if (await deploymentIsUsable(algod, current)) {
+    return current!;
+  }
+
+  const discovered = (() => {
+    try {
+      return loadDeployment();
+    } catch {
+      return undefined;
+    }
+  })();
+  if (await deploymentIsUsable(algod, discovered)) {
+    return discovered!;
+  }
+
+  const sdkRoot = findSdkRoot();
+  deployLocalnetProtocol(sdkRoot);
+  const deployed = loadDeployment();
+  if (!(await deploymentIsUsable(algod, deployed))) {
+    throw new Error("Localnet deployment did not become usable after running deploy-localnet.");
+  }
+  return deployed;
 }
 
 // ---------------------------------------------------------------------------
@@ -35,10 +153,10 @@ export function loadDeployment(): Deployment {
 // ---------------------------------------------------------------------------
 
 const ALGOD_TOKEN = "a".repeat(64);
-const ALGOD_SERVER = "http://localhost";
+const ALGOD_SERVER = "http://127.0.0.1";
 const ALGOD_PORT = 4001;
 const KMD_TOKEN = "a".repeat(64);
-const KMD_SERVER = "http://localhost";
+const KMD_SERVER = "http://127.0.0.1";
 const KMD_PORT = 4002;
 
 export function createAlgod() {
@@ -253,7 +371,7 @@ export async function createE2EHarness(): Promise<E2EHarness> {
   // Verify localnet is running
   await algod.status().do();
 
-  const deployment = loadDeployment();
+  const deployment = await ensureLocalnetDeployment(algod);
   const deployer = await getLocalnetAccountByAddress(kmd, deployment.deployer);
   await resetBlockOffsetTimestamp(algod, deployer);
 
@@ -284,7 +402,7 @@ export async function createE2EHarness(): Promise<E2EHarness> {
   }
 
   const config: ServerConfig = {
-    indexerUrl: "http://localhost:3001",
+    indexerUrl: "http://127.0.0.1:3001",
     indexerAuth: "",
     indexerWriteToken: "",
     algodServer: ALGOD_SERVER,
@@ -297,7 +415,7 @@ export async function createE2EHarness(): Promise<E2EHarness> {
     protocolConfigAppId: deployment.protocolConfigAppId,
     usdcAsaId: deployment.usdcAsaId,
     agentMnemonic: "",
-    faucetUrl: "http://localhost:9999/faucet", // no real faucet on localnet
+    faucetUrl: "http://127.0.0.1:9999/faucet", // no real faucet on localnet
     pinataJwt: "",
     pinataGateway: "",
   };

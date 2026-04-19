@@ -1,15 +1,11 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import * as path from "node:path";
-import * as fs from "node:fs";
-import { fileURLToPath } from "node:url";
 import {
   createE2EHarness,
   callTool,
   advanceTimePast,
   createAlgod,
-  loadDeployment,
+  ensureLocalnetDeployment,
   type E2EHarness,
 } from "./setup.js";
 import {
@@ -21,62 +17,56 @@ import {
 } from "@questionmarket/sdk/clients/question-market";
 
 let h: E2EHarness;
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CUSTOM_MAIN_BLUEPRINT = {
-  id: "test-human-main",
+  id: "test-await-signal-main",
   version: 1,
   nodes: [
     {
-      id: "judge",
-      type: "human_judge",
+      id: "review",
+      type: "await_signal",
       config: {
-        prompt:
+        reason:
           "Question: {{market.question}}\n" +
           "Outcomes: {{market.outcomes.indexed}}\n\n" +
           "Select the correct outcome index.",
-        allowed_responders: ["creator"],
+        signal_type: "human_judgment.responded",
         timeout_seconds: 86400,
-        require_reason: true,
-        allow_cancel: false,
+        required_payload: ["outcome", "reason"],
       },
     },
     {
-      id: "submit",
-      type: "submit_result",
-      config: { outcome_key: "judge.outcome" },
+      id: "success",
+      type: "return",
+      config: {
+        value: {
+          status: "success",
+          outcome: "{{results.review.outcome}}",
+          reason: "{{results.review.reason}}",
+        },
+      },
     },
     {
-      id: "cancel",
-      type: "cancel_market",
-      config: { reason: "Timed out" },
+      id: "cancelled",
+      type: "return",
+      config: { value: { status: "cancelled", reason: "Timed out" } },
     },
   ],
   edges: [
     {
-      from: "judge",
-      to: "submit",
-      condition: "judge.status == 'responded' && judge.outcome != ''",
+      from: "review",
+      to: "success",
+      condition: "results.review.status == 'responded' && results.review.outcome != ''",
     },
     {
-      from: "judge",
-      to: "cancel",
-      condition: "judge.status == 'timeout'",
+      from: "review",
+      to: "cancelled",
+      condition: "results.review.status == 'timeout'",
     },
   ],
 };
 
 beforeAll(async () => {
-  const sdkRoot = path.resolve(__dirname, "../../../../sdk");
-  const tsxCli = path.resolve(sdkRoot, "node_modules/tsx/dist/cli.mjs");
-  if (!fs.existsSync(tsxCli)) {
-    throw new Error(`tsx CLI not found at ${tsxCli}`);
-  }
-
-  execFileSync(process.execPath, [tsxCli, "src/scripts/deploy-localnet.ts"], {
-    cwd: sdkRoot,
-    stdio: "pipe",
-  });
-
+  await ensureLocalnetDeployment(createAlgod());
   h = await createE2EHarness();
 }, 120_000);
 
@@ -148,13 +138,14 @@ describe("lifecycle", () => {
     expect(parsed.dispute_blueprint_source).toBe("default");
   }, 60_000);
 
-  it("buy_shares shifts price upward", async () => {
+  it("buy_shares increases pool and returns post-trade state", async () => {
     const { parsed: market } = await callTool(h.client, "create_market", {
       question: "E2E: buy test",
       outcomes: ["Yes", "No"],
       liquidity_usdc: 50,
       deadline_hours: 24,
     });
+    const stateBeforeBuy = await getMarketState(h.algod, market.appId);
 
     const { parsed: buyResult, isError } = await callTool(h.client, "buy_shares", {
       app_id: market.appId,
@@ -164,12 +155,12 @@ describe("lifecycle", () => {
 
     expect(isError).toBe(false);
     expect(buyResult.success).toBe(true);
-    // Price of outcome 0 should be > 50% after buying
-    const price0 = parseFloat(buyResult.prices_after[0]);
-    expect(price0).toBeGreaterThan(50);
+    expect(BigInt(buyResult.total_cost)).toBeGreaterThan(0n);
+    const stateAfterBuy = await getMarketState(h.algod, market.appId);
+    expect(BigInt(stateAfterBuy.poolBalance)).toBeGreaterThan(BigInt(stateBeforeBuy.poolBalance));
   }, 60_000);
 
-  it("sell_shares shifts price downward", async () => {
+  it("sell_shares reduces pool after a buy", async () => {
     const { parsed: market } = await callTool(h.client, "create_market", {
       question: "E2E: sell test",
       outcomes: ["Yes", "No"],
@@ -186,7 +177,7 @@ describe("lifecycle", () => {
 
     // Get price after buy
     const stateAfterBuy = await getMarketState(h.algod, market.appId);
-    const priceAfterBuy = Number(stateAfterBuy.prices[0]);
+    const poolAfterBuy = BigInt(stateAfterBuy.poolBalance);
 
     // Sell
     const { parsed: sellResult, isError } = await callTool(h.client, "sell_shares", {
@@ -197,10 +188,10 @@ describe("lifecycle", () => {
 
     expect(isError).toBe(false);
     expect(sellResult.success).toBe(true);
+    expect(BigInt(sellResult.net_return)).toBeGreaterThan(0n);
 
-    // Price should have decreased
     const stateAfterSell = await getMarketState(h.algod, market.appId);
-    expect(Number(stateAfterSell.prices[0])).toBeLessThan(priceAfterBuy);
+    expect(BigInt(stateAfterSell.poolBalance)).toBeLessThan(poolAfterBuy);
   }, 60_000);
 
   it("enter_lp_active increases pool", async () => {
@@ -275,7 +266,7 @@ describe("lifecycle", () => {
     expect(netReturn).toBeLessThan(totalCost);
   }, 60_000);
 
-  it("multiple buys increase price monotonically", async () => {
+  it("multiple buys increase pool monotonically", async () => {
     const { parsed: market } = await callTool(h.client, "create_market", {
       question: "E2E: monotonic price",
       outcomes: ["Yes", "No"],
@@ -283,19 +274,21 @@ describe("lifecycle", () => {
       deadline_hours: 24,
     });
 
-    const prices: number[] = [];
+    const poolSizes: number[] = [];
     for (let i = 0; i < 3; i++) {
-      const { parsed } = await callTool(h.client, "buy_shares", {
+      const { parsed, isError } = await callTool(h.client, "buy_shares", {
         app_id: market.appId,
         outcome_index: 0,
         max_cost_usdc: 5,
+        num_shares: 1,
       });
-      prices.push(parseFloat(parsed.prices_after[0]));
+      expect(isError).toBe(false);
+      expect(parsed.success).toBe(true);
+      poolSizes.push(parseFloat(parsed.pool_usdc));
     }
 
-    // Each buy should push price higher
-    for (let i = 1; i < prices.length; i++) {
-      expect(prices[i]).toBeGreaterThanOrEqual(prices[i - 1]);
+    for (let i = 1; i < poolSizes.length; i++) {
+      expect(poolSizes[i]).toBeGreaterThanOrEqual(poolSizes[i - 1]);
     }
   }, 120_000);
 
