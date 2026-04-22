@@ -23,8 +23,6 @@ export const STUB_CONFIG: ServerConfig = {
   usdcAsaId: 1001,
   agentMnemonic: "",
   faucetUrl: "http://stub-faucet:9999/faucet",
-  pinataJwt: "stub-pinata-jwt",
-  pinataGateway: "",
 };
 
 export type TestHarness = {

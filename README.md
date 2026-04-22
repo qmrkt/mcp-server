@@ -8,28 +8,19 @@ The minimal config gives agents read access plus wallet onboarding. To enable tr
 
 ### Read-only + onboarding
 
-This enables market browsing, holdings lookups, wallet creation, `set_wallet`, faucet requests, and ALGO balance checks.
+All env vars have sensible defaults (public indexer, public testnet algod, public faucet), so the minimal install needs no env block. This enables market browsing, holdings lookups, wallet creation, `set_wallet`, faucet requests, and ALGO balance checks.
 
 ### Claude Code
 
 ```bash
 claude mcp add --transport stdio --scope user \
-  --env INDEXER_URL=https://question.market/api \
-  --env ALGOD_SERVER=https://testnet-api.4160.nodely.dev \
-  --env ALGOD_PORT=443 \
-  --env ALGOD_TOKEN= \
   question-market -- npx -y @questionmarket/mcp
 ```
 
 ### Codex
 
 ```bash
-codex mcp add question-market \
-  --env INDEXER_URL=https://question.market/api \
-  --env ALGOD_SERVER=https://testnet-api.4160.nodely.dev \
-  --env ALGOD_PORT=443 \
-  --env ALGOD_TOKEN= \
-  -- npx -y @questionmarket/mcp
+codex mcp add question-market -- npx -y @questionmarket/mcp
 ```
 
 ### JSON config
@@ -39,27 +30,25 @@ codex mcp add question-market \
   "mcpServers": {
     "question-market": {
       "command": "npx",
-      "args": ["-y", "@questionmarket/mcp"],
-      "env": {
-        "INDEXER_URL": "https://question.market/api",
-        "ALGOD_SERVER": "https://testnet-api.4160.nodely.dev",
-        "ALGOD_PORT": "443",
-        "ALGOD_TOKEN": ""
-      }
+      "args": ["-y", "@questionmarket/mcp"]
     }
   }
 }
 ```
 
+Override any of `INDEXER_URL`, `ALGOD_SERVER`, `ALGOD_PORT`, or `ALGOD_TOKEN` only if you need to point at a different endpoint.
+
 ## Enable Trading And Create-Market
 
-Outside the monorepo, set these extra env vars before starting the server:
+The published package ships with the current testnet deployment bundled. When `ALGOD_SERVER` points at a testnet endpoint (the default), the server auto-loads `FACTORY_APP_ID`, `PROTOCOL_CONFIG_APP_ID`, and `USDC_ASA_ID` from that bundle — you do not need to set them manually.
 
-- `USDC_ASA_ID` to enable trading, LP, claims, refunds, and USDC-aware balances
-- `FACTORY_APP_ID` and `PROTOCOL_CONFIG_APP_ID` to enable `create_market`
-- `INDEXER_WRITE_TOKEN` to enable `set_market_image` and authenticated image upload during `create_market`
+The only thing you still need to add for write tools is a signer:
 
-Example:
+- `AGENT_MNEMONIC` — 25-word mnemonic preloaded at startup (best for unattended / CI use)
+- Runtime `set_wallet(mnemonic)` — overrides `AGENT_MNEMONIC` for the current session; use this after `create_wallet`
+- Localnet KMD fallback — only applies when neither of the above is set and you are pointing at a local sandbox
+
+Example (testnet, with preloaded mnemonic):
 
 ```json
 {
@@ -68,21 +57,16 @@ Example:
       "command": "npx",
       "args": ["-y", "@questionmarket/mcp"],
       "env": {
-        "INDEXER_URL": "https://question.market/api",
-        "ALGOD_SERVER": "https://testnet-api.4160.nodely.dev",
-        "ALGOD_PORT": "443",
-        "ALGOD_TOKEN": "",
-        "USDC_ASA_ID": "<usdc_asa_id>",
-        "FACTORY_APP_ID": "<factory_app_id>",
-        "PROTOCOL_CONFIG_APP_ID": "<protocol_config_app_id>",
-        "INDEXER_WRITE_TOKEN": "<optional_indexer_write_token>"
+        "AGENT_MNEMONIC": "your twenty five word mnemonic goes here ..."
       }
     }
   }
 }
 ```
 
-For local development, the server also looks for a deployment file via `QUESTION_MARKET_DEPLOYMENT_PATH`, `QUESTION_MARKET_DEPLOYMENT_OUT`, the SDK's shared temp cache, and the older monorepo `protocol-deployment.json` locations. Published installs should still set the app IDs explicitly.
+**Network selection.** By default the server looks at `ALGOD_SERVER` to pick the bundled deployment (mainnet, testnet, or localnet). Override with `QUESTION_MARKET_NETWORK=testnet|mainnet|localnet` or point at a custom deployment file with `QUESTION_MARKET_DEPLOYMENT_PATH`. Env vars (`USDC_ASA_ID`, `FACTORY_APP_ID`, `PROTOCOL_CONFIG_APP_ID`) always win over the bundle.
+
+**Localnet.** Run `algokit localnet start`, deploy the SDK (`npm run deploy:localnet` inside `sdk/`), and the resulting `protocol-deployment.json` will be auto-discovered. Alternatively, set `QUESTION_MARKET_DEPLOYMENT_PATH=/absolute/path/to/protocol-deployment.json`.
 
 ## Verify it works
 
@@ -122,7 +106,6 @@ Write tools:
 - `withdraw_lp_fees`
 - `claim_lp_residual`
 - `create_market`
-- `set_market_image`
 
 The server only registers write tools when the required env vars are configured.
 
@@ -130,20 +113,23 @@ The server only registers write tools when the required env vars are configured.
 
 | Variable | Required | Description |
 |---|---|---|
-| `INDEXER_URL` | Yes | question.market API endpoint |
-| `ALGOD_SERVER` | Yes | Algorand node URL |
-| `ALGOD_PORT` | Yes | Algorand node port |
-| `ALGOD_TOKEN` | No | Algorand node auth token |
-| `USDC_ASA_ID` | Required for trading | Enables trading, LP, claims, refunds, and USDC-aware balances |
-| `FACTORY_APP_ID` | Required for `create_market` | MarketFactory application ID |
-| `PROTOCOL_CONFIG_APP_ID` | Required for `create_market` | ProtocolConfig application ID |
-| `INDEXER_WRITE_TOKEN` | Required for `set_market_image` | Bearer token for authenticated indexer writes |
-| `AGENT_MNEMONIC` | No | Preload a wallet for write tools on startup |
-| `FAUCET_URL` | No | Override the faucet endpoint for `request_testnet_tokens` |
-| `INDEXER_AUTH` | No | Optional basic-auth credentials for the indexer |
-| `KMD_SERVER` | No | LocalNet KMD URL |
-| `KMD_PORT` | No | LocalNet KMD port |
-| `KMD_TOKEN` | No | LocalNet KMD token |
+| `INDEXER_URL` | No | question.market API endpoint. Default: `https://question.market/api` |
+| `ALGOD_SERVER` | No | Algorand node URL. Default: `https://testnet-api.4160.nodely.dev` |
+| `ALGOD_PORT` | No | Algorand node port. Default: `443` |
+| `ALGOD_TOKEN` | No | Algorand node auth token. Default: empty (correct for Nodely) |
+| `USDC_ASA_ID` | No (auto from bundle) | USDC ASA ID. Required for trading, LP, claims, refunds, and USDC-aware balances. Auto-loaded from the bundled deployment matching `ALGOD_SERVER` |
+| `FACTORY_APP_ID` | No (auto from bundle) | MarketFactory application ID. Required for `create_market`. Auto-loaded from the bundled deployment |
+| `PROTOCOL_CONFIG_APP_ID` | No (auto from bundle) | ProtocolConfig application ID. Required for `create_market`. Auto-loaded from the bundled deployment |
+| `AGENT_MNEMONIC` | No | 25-word mnemonic preloaded as the signer for write tools. Overridden by a runtime `set_wallet` call |
+| `FAUCET_URL` | No | Override the faucet endpoint for `request_testnet_tokens`. Default: `https://question.market/api/faucet` |
+| `INDEXER_AUTH` | No | Optional basic-auth credentials for self-hosted indexers |
+| `INDEXER_WRITE_TOKEN` | No | Optional bearer token used only by `create_market` to persist blueprint JSON to the indexer's meta endpoint. Failures are non-fatal |
+| `QUESTION_MARKET_NETWORK` | No | Force network selection (`testnet`, `mainnet`, or `localnet`) when auto-detection from `ALGOD_SERVER` is wrong |
+| `QUESTION_MARKET_DEPLOYMENT_PATH` | No | Override path to a `protocol-deployment.json` used to auto-load `FACTORY_APP_ID`, `PROTOCOL_CONFIG_APP_ID`, and `USDC_ASA_ID` |
+| `QUESTION_MARKET_DEPLOYMENT_OUT` | No | Same as above, used by some deploy scripts that write to a separate output path |
+| `KMD_SERVER` | No | LocalNet KMD URL. Default: `http://localhost` |
+| `KMD_PORT` | No | LocalNet KMD port. Default: `4002` |
+| `KMD_TOKEN` | No | LocalNet KMD token. Default: 64 × `a` |
 
 ## Built on
 

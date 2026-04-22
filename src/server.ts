@@ -19,7 +19,6 @@ import {
 } from "./helpers.js";
 import { MCP_SERVER_VERSION } from "./version.js";
 import { IndexerClient } from "@questionmarket/sdk/indexer";
-import { IpfsClient } from "@questionmarket/sdk/ipfs";
 
 import {
   AtomicCreateUnsupportedError,
@@ -71,8 +70,6 @@ export interface ServerConfig {
   usdcAsaId: number;
   agentMnemonic: string;
   faucetUrl: string;
-  pinataJwt: string;
-  pinataGateway: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -95,8 +92,6 @@ export function createQuestionMarketServer(config: ServerConfig) {
     usdcAsaId,
     agentMnemonic,
     faucetUrl,
-    pinataJwt,
-    pinataGateway,
   } = config;
 
   const algod = new algosdk.Algodv2(algodToken, algodServer, algodPort);
@@ -104,7 +99,6 @@ export function createQuestionMarketServer(config: ServerConfig) {
   const textEncoder = new TextEncoder();
   const hasTradingConfig = usdcAsaId > 0;
   const hasCreateMarketConfig = hasTradingConfig && factoryAppId > 0 && protocolConfigAppId > 0;
-  const hasImageUploadConfig = pinataJwt.length > 0;
 
   function deriveBlueprintCid(mainBlueprint: Uint8Array, disputeBlueprint: Uint8Array): Uint8Array {
     const digest = createHash("sha256")
@@ -116,9 +110,6 @@ export function createQuestionMarketServer(config: ServerConfig) {
   }
 
   const indexer = new IndexerClient({ baseUrl: indexerUrl, auth: indexerAuth || undefined });
-  const ipfs = pinataJwt
-    ? new IpfsClient({ pinataJwt, pinataGateway: pinataGateway || undefined })
-    : null;
 
   // Session state (isolated per server instance)
   let sessionMnemonic: string | null = null;
@@ -617,7 +608,6 @@ export function createQuestionMarketServer(config: ServerConfig) {
   ];
   const availableWriteToolNames = [
     ...(hasCreateMarketConfig ? ["create_market"] : []),
-    ...(hasImageUploadConfig ? ["set_market_image"] : []),
     ...(hasTradingConfig ? tradingToolNames : []),
   ];
   const disabledWriteTools = [
@@ -633,12 +623,6 @@ export function createQuestionMarketServer(config: ServerConfig) {
       ? [{
           tools: tradingToolNames,
           reason: "Set USDC_ASA_ID to enable trading, LP, claims, refunds, and USDC-aware balance reporting.",
-        }]
-      : []),
-    ...(!hasImageUploadConfig
-      ? [{
-          tools: ["set_market_image"],
-          reason: "Set PINATA_JWT to enable IPFS image uploads.",
         }]
       : []),
   ];
@@ -663,7 +647,7 @@ export function createQuestionMarketServer(config: ServerConfig) {
         onboarding: [
           "1. create_wallet() to generate an Algorand account",
           "2. set_wallet(mnemonic) to activate it for this MCP connection",
-          "3. request_testnet_tokens(address) to get 10 ALGO + 100 tUSDC",
+          "3. request_testnet_tokens(address) — first call drips 50 ALGO (24h cooldown, wallet+IP); after opting into tUSDC, call again for the 100 tUSDC drip (1h cooldown, wallet only)",
           hasTradingConfig
             ? "4. Start trading with buy_shares, sell_shares, enter_lp_active, and claim_winnings."
             : "4. To enable trading and market creation outside the monorepo, set USDC_ASA_ID, FACTORY_APP_ID, and PROTOCOL_CONFIG_APP_ID before starting the server.",
@@ -676,7 +660,6 @@ export function createQuestionMarketServer(config: ServerConfig) {
         configuration: {
           trading_enabled: hasTradingConfig,
           create_market_enabled: hasCreateMarketConfig,
-          set_market_image_enabled: hasImageUploadConfig,
           disabled_write_tools: disabledWriteTools,
         },
         tools: {
@@ -785,7 +768,7 @@ export function createQuestionMarketServer(config: ServerConfig) {
 
   server.tool(
     "get_leaderboard",
-    "Get the leaderboard: wallets ranked by trading PnL.",
+    "Get the leaderboard: wallets ranked by realized trading PnL from closed positions.",
     {},
     safe(async () => text(await indexer.getLeaderboard()), "get_leaderboard")
   );
@@ -805,7 +788,7 @@ export function createQuestionMarketServer(config: ServerConfig) {
         blueprint: blueprintInputSchema.optional().describe("Shared blueprint for both main and dispute paths."),
         main_blueprint: blueprintInputSchema.optional().describe("Optional main-path blueprint JSON. Overrides blueprint for the main path."),
         dispute_blueprint: blueprintInputSchema.optional().describe("Optional dispute-path blueprint JSON. Overrides blueprint for the dispute path."),
-        image_url: z.string().url().optional().describe("URL of an image to use as market thumbnail (JPEG, PNG, or WebP, max 2MB). Downloaded and stored by the indexer."),
+        image_url: z.string().url().optional().describe("URL of an image to use as market thumbnail (JPEG, PNG, or WebP, max 4MB). Downloaded and stored by the indexer."),
       },
       safe(async ({ question, outcomes, liquidity_usdc, deadline_hours, lp_entry_max_price, blueprint, main_blueprint, dispute_blueprint, image_url }) => {
         const account = await getAccount(0);
@@ -817,18 +800,22 @@ export function createQuestionMarketServer(config: ServerConfig) {
         const block = await algod.block(Number(status.lastRound)).do();
         const blockTs = Number(block.block.header.timestamp);
         const deadline = blockTs + Math.floor(deadline_hours * 3600);
-        // Upload image to IPFS before creating market so CID can go in the note
+        // Upload image through the indexer before creating the market so the
+        // CID can go in the on-chain note. The indexer owns the PINATA_JWT;
+        // local-cache fallback means we still get an image even if Pinata is down.
         let imageCid: string | null = null;
-        let imageStatus: "none" | "uploaded" | "failed" | "skipped_no_ipfs" = "none";
-        if (image_url && !ipfs) {
-          imageStatus = "skipped_no_ipfs";
-        } else if (image_url && ipfs) {
-          imageStatus = "failed";
+        let imageStatus: "none" | "uploaded" | "local_only" | "failed" = "none";
+        if (image_url) {
           try {
-            imageCid = await ipfs.uploadFromUrl(image_url);
-            imageStatus = "uploaded";
+            const result = await indexer.uploadImage(image_url);
+            if (result.cid) {
+              imageCid = result.cid;
+              imageStatus = result.localOnly ? "local_only" : "uploaded";
+            } else {
+              imageStatus = "local_only";
+            }
           } catch {
-            // Non-fatal: market will be created without an image CID.
+            imageStatus = "failed";
           }
         }
 
@@ -880,6 +867,33 @@ export function createQuestionMarketServer(config: ServerConfig) {
           throw error;
         }
 
+        // Persist the compiled blueprint JSON to the indexer so the market
+        // page renders the exact DAG instead of falling back to an inferred one.
+        // Failures here are non-fatal -- the market is already on-chain.
+        let metaStatus: "persisted" | "skipped" | "failed" = "skipped";
+        if (indexerWriteToken) {
+          try {
+            const mainJson = JSON.parse(new TextDecoder().decode(compiledMainBlueprint.bytes));
+            const disputeJson = JSON.parse(new TextDecoder().decode(compiledDisputeBlueprint.bytes));
+            const metaResp = await fetch(`${indexerUrl}/markets/${atomicResult.marketAppId}/meta`, {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${indexerWriteToken}`,
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                question,
+                outcomes,
+                mainBlueprint: mainJson,
+                disputeBlueprint: disputeJson,
+              }),
+            });
+            metaStatus = metaResp.ok ? "persisted" : "failed";
+          } catch {
+            metaStatus = "failed";
+          }
+        }
+
         return text({
           success: true,
           appId: atomicResult.marketAppId,
@@ -888,6 +902,7 @@ export function createQuestionMarketServer(config: ServerConfig) {
           blueprint_source: blueprintSource,
           main_blueprint_source: compiledMainBlueprint.source,
           dispute_blueprint_source: compiledDisputeBlueprint.source,
+          blueprint_meta: metaStatus,
           liquidity: `${liquidity_usdc} USDC`,
           lp_entry_max_price,
           deadline: new Date(deadline * 1000).toISOString(),
@@ -895,22 +910,6 @@ export function createQuestionMarketServer(config: ServerConfig) {
           image_cid: imageCid,
         });
       }, "create_market")
-    );
-  }
-
-  if (hasImageUploadConfig) {
-    server.tool(
-      "set_market_image",
-      "Upload an image to IPFS for an existing market. Returns the CID that can be used to reference the image.",
-      {
-        app_id: z.number().int().positive().describe("Market application ID"),
-        image_url: z.string().url().describe("URL of the image to upload (JPEG, PNG, or WebP)"),
-      },
-      safe(async ({ app_id, image_url }) => {
-        if (!ipfs) throw new Error("IPFS client not configured. Set PINATA_JWT to enable image uploads.");
-        const cid = await ipfs.uploadFromUrl(image_url);
-        return text({ success: true, app_id, image: "uploaded", cid });
-      }, "set_market_image")
     );
   }
 
@@ -1242,7 +1241,13 @@ export function createQuestionMarketServer(config: ServerConfig) {
 
   server.tool(
     "request_testnet_tokens",
-    "Request free testnet ALGO and tUSDC from the question.market faucet. Rate limited to once per hour per address.",
+    [
+      "Request free testnet ALGO and tUSDC. ALGO is capped at one drip per wallet / IP every 24 hours;",
+      "tUSDC is capped at one drip per wallet every hour. The first call will usually fund 50 ALGO",
+      "only — if the wallet is not yet opted in to tUSDC, the response will set `optIn: true`. In that",
+      "case, sign an asset-0 opt-in transaction for the current USDC ASA with the target wallet, then",
+      "call request_testnet_tokens again to receive 100 tUSDC.",
+    ].join(" "),
     { address: z.string().length(58).describe("Algorand address to fund") },
     safe(async ({ address }) => {
       const resp = await fetch(faucetUrl, {
@@ -1258,6 +1263,10 @@ export function createQuestionMarketServer(config: ServerConfig) {
       }
       if (!resp.ok || data.error) {
         throw new Error((data.error as string) || `Faucet request failed (${resp.status})`);
+      }
+      if (data.optIn && !data.usdc) {
+        (data as Record<string, unknown>).next_step =
+          "Account is not opted in to tUSDC yet. Sign an asset opt-in transaction (0-amount asset transfer to self) for the current USDC ASA, then call request_testnet_tokens again to receive 100 tUSDC.";
       }
       return text(data);
     }, "request_testnet_tokens")

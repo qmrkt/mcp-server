@@ -1,6 +1,6 @@
 {
   "name": "@questionmarket/mcp",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "MCP server for question.market prediction markets on Algorand",
   "type": "module",
   "main": "./dist/index.js",
@@ -18,7 +18,8 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && node ./scripts/copy-deployments.mjs",
+    "sync:deployments": "node ./scripts/sync-deployments.mjs",
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
     "typecheck": "tsc --noEmit",

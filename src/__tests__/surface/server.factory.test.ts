@@ -24,7 +24,6 @@ describe("server factory", () => {
       "get_market_positions",
       "get_leaderboard",
       "create_market",
-      "set_market_image",
       "buy_shares",
       "sell_shares",
       "enter_lp_active",
@@ -61,7 +60,6 @@ describe("server factory", () => {
     expect(parsed.tools.write).toContain("refund_shares");
     expect(parsed.configuration.trading_enabled).toBe(true);
     expect(parsed.configuration.create_market_enabled).toBe(true);
-    expect(parsed.configuration.set_market_image_enabled).toBe(true);
     expect(parsed.configuration.disabled_write_tools).toEqual([]);
     expect(parsed.resources).toContain("market://{appId}");
   });
@@ -72,7 +70,6 @@ describe("server factory", () => {
       protocolConfigAppId: 0,
       usdcAsaId: 0,
       indexerWriteToken: "",
-      pinataJwt: "",
     });
 
     const result = await harness.client.listTools();
@@ -84,17 +81,14 @@ describe("server factory", () => {
     expect(names).not.toContain("enter_lp_active");
     expect(names).not.toContain("claim_winnings");
     expect(names).not.toContain("refund_shares");
-    expect(names).not.toContain("set_market_image");
 
     const { parsed } = await callTool(harness.client, "question_market");
     expect(parsed.tools.write).toEqual([]);
     expect(parsed.configuration.trading_enabled).toBe(false);
     expect(parsed.configuration.create_market_enabled).toBe(false);
-    expect(parsed.configuration.set_market_image_enabled).toBe(false);
     expect(parsed.configuration.disabled_write_tools).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ tools: ["create_market"] }),
-        expect.objectContaining({ tools: ["set_market_image"] }),
       ]),
     );
   });
