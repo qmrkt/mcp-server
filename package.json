@@ -1,6 +1,6 @@
 {
   "name": "@questionmarket/mcp",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "MCP server for question.market prediction markets on Algorand",
   "type": "module",
   "main": "./dist/index.js",

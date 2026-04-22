@@ -1239,36 +1239,107 @@ export function createQuestionMarketServer(config: ServerConfig) {
     }, "set_wallet")
   );
 
+  async function callFaucet(address: string): Promise<Record<string, unknown>> {
+    const resp = await fetch(faucetUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ address }),
+    });
+    let data: Record<string, unknown>;
+    try {
+      data = (await resp.json()) as Record<string, unknown>;
+    } catch {
+      throw new Error(`Faucet returned non-JSON response (${resp.status}). The faucet may be down or the address is invalid.`);
+    }
+    if (!resp.ok || data.error) {
+      throw new Error((data.error as string) || `Faucet request failed (${resp.status})`);
+    }
+    return data;
+  }
+
+  async function optInToUsdc(account: {
+    addr: string;
+    signer: algosdk.TransactionSigner;
+  }): Promise<string> {
+    const sp = await algod.getTransactionParams().do();
+    const txn = algosdk.makeAssetTransferTxnWithSuggestedParamsFromObject({
+      sender: account.addr,
+      receiver: account.addr,
+      assetIndex: usdcAsaId,
+      amount: 0n,
+      suggestedParams: sp,
+    });
+    const atc = new algosdk.AtomicTransactionComposer();
+    atc.addTransaction({ txn, signer: account.signer });
+    const result = await atc.execute(algod, 4);
+    return result.txIDs[0];
+  }
+
   server.tool(
     "request_testnet_tokens",
     [
-      "Request free testnet ALGO and tUSDC. ALGO is capped at one drip per wallet / IP every 24 hours;",
-      "tUSDC is capped at one drip per wallet every hour. The first call will usually fund 50 ALGO",
-      "only — if the wallet is not yet opted in to tUSDC, the response will set `optIn: true`. In that",
-      "case, sign an asset-0 opt-in transaction for the current USDC ASA with the target wallet, then",
-      "call request_testnet_tokens again to receive 100 tUSDC.",
+      "Fund the active session wallet (or a specified address) with testnet ALGO and tUSDC in one call.",
+      "When the address is omitted or matches the active session wallet, the MCP also signs the tUSDC",
+      "opt-in automatically and calls the faucet a second time so the wallet ends up with both ALGO and",
+      "tUSDC. ALGO drips are capped at one per wallet / IP every 24 hours; tUSDC at one per wallet every",
+      "hour. If a third-party address is passed, the MCP can only request the ALGO drip and returns",
+      "optIn:true — that wallet's owner must sign the opt-in themselves.",
     ].join(" "),
-    { address: z.string().length(58).describe("Algorand address to fund") },
+    {
+      address: z
+        .string()
+        .length(58)
+        .optional()
+        .describe("Algorand address to fund. Defaults to the active session wallet."),
+    },
     safe(async ({ address }) => {
-      const resp = await fetch(faucetUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ address }),
-      });
-      let data: Record<string, unknown>;
+      let target = address;
+      let signerAccount: { addr: string; signer: algosdk.TransactionSigner } | null = null;
+      const activeMnemonic = getActiveMnemonic();
+      if (activeMnemonic) {
+        const active = getMnemonicAccount(activeMnemonic);
+        if (!target || target === active.addr) {
+          target = active.addr;
+          signerAccount = active;
+        }
+      }
+      if (!target) {
+        throw new Error(
+          "No address provided and no session wallet active. Call create_wallet + set_wallet first, or pass an address explicitly."
+        );
+      }
+
+      const first = await callFaucet(target);
+      const needsOptIn = Boolean(first.optIn) && !first.usdc;
+
+      if (!needsOptIn) return text(first);
+
+      if (!signerAccount) {
+        (first as Record<string, unknown>).next_step =
+          "Account is not opted in to tUSDC yet. Sign an asset-0 opt-in for the current USDC ASA with the target wallet, then call request_testnet_tokens again to receive 100 tUSDC.";
+        return text(first);
+      }
+
+      let optInTxId: string;
       try {
-        data = await resp.json() as Record<string, unknown>;
-      } catch {
-        throw new Error(`Faucet returned non-JSON response (${resp.status}). The faucet may be down or the address is invalid.`);
+        optInTxId = await optInToUsdc(signerAccount);
+      } catch (err) {
+        (first as Record<string, unknown>).opt_in_error =
+          err instanceof Error ? err.message : String(err);
+        (first as Record<string, unknown>).next_step =
+          "Auto opt-in failed. Try again, or sign an asset-0 opt-in for the current USDC ASA manually and re-run request_testnet_tokens.";
+        return text(first);
       }
-      if (!resp.ok || data.error) {
-        throw new Error((data.error as string) || `Faucet request failed (${resp.status})`);
-      }
-      if (data.optIn && !data.usdc) {
-        (data as Record<string, unknown>).next_step =
-          "Account is not opted in to tUSDC yet. Sign an asset opt-in transaction (0-amount asset transfer to self) for the current USDC ASA, then call request_testnet_tokens again to receive 100 tUSDC.";
-      }
-      return text(data);
+
+      const second = await callFaucet(target);
+
+      return text({
+        ...first,
+        ...second,
+        algo: first.algo ?? second.algo,
+        opt_in_tx_id: optInTxId,
+        auto_opt_in: true,
+      });
     }, "request_testnet_tokens")
   );
 
